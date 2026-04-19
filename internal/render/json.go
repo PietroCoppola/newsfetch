@@ -27,11 +27,16 @@ func JSON(s fetch.Story, now time.Time) string {
 	if tags == nil {
 		tags = []string{}
 	}
+	// Clamp negative age to 0 to match rank.Score's handling of clock skew.
+	ageSeconds := int64(now.Sub(s.CreatedAt).Seconds())
+	if ageSeconds < 0 {
+		ageSeconds = 0
+	}
 	b, _ := json.Marshal(payload{
 		Title:      s.Title,
 		URL:        s.URL,
 		Source:     s.Source,
-		AgeSeconds: int64(now.Sub(s.CreatedAt).Seconds()),
+		AgeSeconds: ageSeconds,
 		Tags:       tags,
 	})
 	return string(b) + "\n"
