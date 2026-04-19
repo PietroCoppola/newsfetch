@@ -6,10 +6,12 @@ package rank
 import (
 	"math"
 	"math/rand"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 )
 
@@ -118,4 +120,47 @@ func tokenize(s string) []string {
 		tokens = append(tokens, b.String())
 	}
 	return tokens
+}
+
+// Options carries per-invocation selection parameters. PoolSize <= 0 uses
+// defaults.RankPoolSize.
+type Options struct {
+	Topics   []string
+	Now      time.Time
+	PoolSize int
+}
+
+// Select scores every story in stories, keeps the top PoolSize candidates,
+// and picks one weighted by score using rng.
+//
+// Callers must pass a non-empty slice. On empty input Select PANICS — the
+// same contract M1's selectStory used. Returning a zero Story silently
+// would propagate bugs; panic gives an immediate, traceable failure.
+func Select(stories []fetch.Story, opts Options, rng *rand.Rand) fetch.Story {
+	if len(stories) == 0 {
+		panic("rank.Select: stories must be non-empty")
+	}
+	pool := opts.PoolSize
+	if pool <= 0 {
+		pool = defaults.RankPoolSize
+	}
+
+	type scored struct {
+		s fetch.Story
+		w float64
+	}
+	all := make([]scored, len(stories))
+	for i, s := range stories {
+		all[i] = scored{s: s, w: Score(s, opts.Topics, opts.Now)}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].w > all[j].w })
+	if len(all) > pool {
+		all = all[:pool]
+	}
+
+	weights := make([]float64, len(all))
+	for i, sc := range all {
+		weights[i] = sc.w
+	}
+	return all[pickWeightedIndex(weights, rng)].s
 }

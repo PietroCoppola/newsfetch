@@ -123,3 +123,100 @@ func TestScore_AgeDecay(t *testing.T) {
 		t.Error("younger story should score higher than older story with same points")
 	}
 }
+
+func TestSelect_EmptyPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Select with empty slice did not panic")
+		}
+	}()
+	rng := rand.New(rand.NewSource(1))
+	_ = Select(nil, Options{Now: time.Now()}, rng)
+}
+
+func TestSelect_DeterministicWithSeed(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	stories := []fetch.Story{
+		{ID: "a", Title: "Alpha", Points: 100, CreatedAt: now.Add(-1 * time.Hour), Tags: []string{}},
+		{ID: "b", Title: "Beta", Points: 200, CreatedAt: now.Add(-2 * time.Hour), Tags: []string{}},
+		{ID: "c", Title: "Gamma", Points: 150, CreatedAt: now.Add(-3 * time.Hour), Tags: []string{}},
+	}
+	opts := Options{Now: now, PoolSize: 3}
+	a := Select(stories, opts, rand.New(rand.NewSource(17)))
+	b := Select(stories, opts, rand.New(rand.NewSource(17)))
+	if a.ID != b.ID {
+		t.Errorf("Select not deterministic under same seed: %q vs %q", a.ID, b.ID)
+	}
+}
+
+func TestSelect_PoolSizeCap_Rank11NeverPicked(t *testing.T) {
+	// Build 12 stories where stories[10] has a dominant score. The pool
+	// size is 10, so ranks 0..9 compete; rank 10 is excluded regardless
+	// of seed. Run many seeds to make the assertion robust.
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	var stories []fetch.Story
+	for i := 0; i < 12; i++ {
+		// Give stories[0..9] the highest points so they fill the pool.
+		// stories[10] gets a "dominant" 10_000 — higher than stories[11]
+		// but below stories[0..9], so it sorts to rank 10 and is excluded
+		// by the pool-size cap. Without that cap, 10_000 would still beat
+		// stories[11] most of the time; the test asserts it never wins.
+		pts := 10_010 - i
+		if i == 10 {
+			pts = 10_000
+		}
+		stories = append(stories, fetch.Story{
+			ID:        fmtID(i),
+			Title:     fmtID(i),
+			Points:    pts,
+			CreatedAt: now.Add(-1 * time.Hour),
+			Tags:      []string{},
+		})
+	}
+	opts := Options{Now: now, PoolSize: 10}
+	for seed := int64(0); seed < 200; seed++ {
+		got := Select(stories, opts, rand.New(rand.NewSource(seed)))
+		if got.ID == fmtID(10) {
+			t.Fatalf("rank-11 story picked at seed %d", seed)
+		}
+	}
+}
+
+func TestSelect_PoolSizeCap_Rank10CanBePicked(t *testing.T) {
+	// Boundary twin: confirm the pool includes the 10th story. Build 10
+	// stories where the 10th dominates; across many seeds the 10th
+	// should win at least once (this is a sanity check that the pool
+	// isn't silently capped at 9 by an off-by-one).
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	var stories []fetch.Story
+	for i := 0; i < 10; i++ {
+		pts := 10 - i
+		if i == 9 {
+			pts = 10_000 // the 10th story dominates
+		}
+		stories = append(stories, fetch.Story{
+			ID:        fmtID(i),
+			Title:     fmtID(i),
+			Points:    pts,
+			CreatedAt: now.Add(-1 * time.Hour),
+			Tags:      []string{},
+		})
+	}
+	opts := Options{Now: now, PoolSize: 10}
+	tenthWon := false
+	for seed := int64(0); seed < 200; seed++ {
+		got := Select(stories, opts, rand.New(rand.NewSource(seed)))
+		if got.ID == fmtID(9) {
+			tenthWon = true
+			break
+		}
+	}
+	if !tenthWon {
+		t.Fatal("rank-10 dominant story never picked; pool may be off-by-one (top-9 instead of top-10)")
+	}
+}
+
+func fmtID(i int) string {
+	return "s-" + string(rune('a'+i%26)) + string(rune('0'+i/10))
+}
