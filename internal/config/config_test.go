@@ -125,7 +125,11 @@ func TestLoad_Partial(t *testing.T) {
 	if cfg.Style != "json" {
 		t.Errorf("Style = %q, want json", cfg.Style)
 	}
-	// Untouched fields keep defaults.
+	// Untouched fields keep defaults. Topics == nil is the sentinel that
+	// drives the no-filter code path in rank.Score; pin it explicitly.
+	if cfg.Topics != nil {
+		t.Errorf("Topics = %v, want nil (not set in file)", cfg.Topics)
+	}
 	if cfg.CacheTTL != config.Defaults().CacheTTL {
 		t.Errorf("CacheTTL = %v, want default %v", cfg.CacheTTL, config.Defaults().CacheTTL)
 	}
