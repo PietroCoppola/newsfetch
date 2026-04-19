@@ -33,6 +33,7 @@ func TestRunDefault_RendersFromFreshCache(t *testing.T) {
 		Points:    100,
 		Author:    "alice",
 		CreatedAt: now.Add(-2 * time.Hour),
+		Tags:      []string{},
 	}
 	if err := cache.Write(path, &cache.File{
 		Version:         cache.SchemaVersion,
