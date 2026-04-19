@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +47,7 @@ func TestRunDefault_RendersFromFreshCache(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runDefault(&buf); err != nil {
+	if err := runDefault(&buf, io.Discard, nil, rand.New(rand.NewSource(1))); err != nil {
 		t.Fatalf("runDefault: %v", err)
 	}
 	out := buf.String()
