@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -170,5 +171,91 @@ func TestLoad_ParseError(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg, config.Defaults()) {
 		t.Errorf("Load returned non-default cfg on parse error: %+v", cfg)
+	}
+}
+
+func TestValidate_Clean(t *testing.T) {
+	cfg := config.Defaults()
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got, cfg) {
+		t.Errorf("Validate mutated clean config: %+v", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected warning: %q", buf.String())
+	}
+}
+
+func TestValidate_BadStyleFromConfig(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Style = "wat"
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{Style: "config"}, &buf)
+	if got.Style != "boxed" {
+		t.Errorf("Style = %q, want boxed", got.Style)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "unknown style") || !strings.Contains(out, "wat") || !strings.Contains(out, "from config") {
+		t.Errorf("warning text missing details: %q", out)
+	}
+}
+
+func TestValidate_BadStyleFromFlag(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Style = "wat"
+	var buf bytes.Buffer
+	config.Validate(cfg, config.FieldSources{Style: "flag"}, &buf)
+	if !strings.Contains(buf.String(), "from --style") {
+		t.Errorf("warning should name --style as source: %q", buf.String())
+	}
+}
+
+func TestValidate_TTLBelowFloor(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.CacheTTL = 2 * time.Minute
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if got.CacheTTL != 5*time.Minute {
+		t.Errorf("CacheTTL = %v, want 5m", got.CacheTTL)
+	}
+	if !strings.Contains(buf.String(), "cache_ttl_minutes=2") {
+		t.Errorf("warning missing ttl=2: %q", buf.String())
+	}
+}
+
+func TestValidate_MinPointsNegative(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.MinPoints = -4
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if got.MinPoints != 0 {
+		t.Errorf("MinPoints = %d, want 0", got.MinPoints)
+	}
+	if !strings.Contains(buf.String(), "min_points=-4") {
+		t.Errorf("warning missing min_points=-4: %q", buf.String())
+	}
+}
+
+func TestValidate_BudgetStyleWinsOverTTL(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Style = "wat"
+	cfg.CacheTTL = 1 * time.Minute
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{Style: "config"}, &buf)
+	// Style gets warning and correction.
+	if got.Style != "boxed" {
+		t.Errorf("Style = %q, want boxed", got.Style)
+	}
+	// TTL is silently corrected (no second warning).
+	if got.CacheTTL != 5*time.Minute {
+		t.Errorf("CacheTTL = %v, want 5m (silently corrected)", got.CacheTTL)
+	}
+	// Exactly one line of warning output.
+	lines := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") + 1
+	if lines != 1 {
+		t.Errorf("warning lines = %d, want 1; got %q", lines, buf.String())
+	}
+	if !strings.Contains(buf.String(), "unknown style") {
+		t.Errorf("expected style to win precedence; got %q", buf.String())
 	}
 }
