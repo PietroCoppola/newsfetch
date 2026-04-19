@@ -7,11 +7,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 )
 
@@ -47,4 +49,49 @@ func Path() (string, error) {
 		return "", fmt.Errorf("resolve config path: %w", err)
 	}
 	return filepath.Join(home, ".config", "newsfetch", "config.toml"), nil
+}
+
+// Load reads and parses the config file at path. It returns:
+//
+//   - (Defaults(), nil) if the file does not exist (normal first-run case).
+//   - (Defaults(), err) if the file exists but fails to parse. The caller
+//     is responsible for emitting a warning and proceeding with Defaults().
+//   - (merged, nil) where merged is Defaults() overlaid with the fields
+//     actually present in the file. Unknown keys are silently ignored.
+//
+// Integer fields present in the file always override (including zero), so
+// Validate can see and correct intentionally out-of-range values. Missing
+// fields keep their default.
+func Load(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Defaults(), nil
+		}
+		return Defaults(), fmt.Errorf("read config: %w", err)
+	}
+	var raw struct {
+		Topics          []string `toml:"topics"`
+		Style           string   `toml:"style"`
+		CacheTTLMinutes int      `toml:"cache_ttl_minutes"`
+		MinPoints       int      `toml:"min_points"`
+	}
+	meta, err := toml.Decode(string(data), &raw)
+	if err != nil {
+		return Defaults(), fmt.Errorf("parse config: %w", err)
+	}
+	cfg := Defaults()
+	if meta.IsDefined("topics") {
+		cfg.Topics = raw.Topics
+	}
+	if meta.IsDefined("style") {
+		cfg.Style = raw.Style
+	}
+	if meta.IsDefined("cache_ttl_minutes") {
+		cfg.CacheTTL = time.Duration(raw.CacheTTLMinutes) * time.Minute
+	}
+	if meta.IsDefined("min_points") {
+		cfg.MinPoints = raw.MinPoints
+	}
+	return cfg, nil
 }
