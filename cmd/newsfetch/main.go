@@ -137,12 +137,12 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 	}
 	cfg, loadErr := config.Load(cfgPath)
 	var src config.FieldSources
-	// Parse error: emit one warning, use defaults, skip Validate.
+	// Parse error: emit one warning, use defaults, continue to apply flags.
 	if loadErr != nil {
 		fmt.Fprintf(errOut, "newsfetch: config: %s: %s; using defaults\n", cfgPath, loadErr)
-		return config.Defaults(), exitRun, nil
+		cfg = config.Defaults()
 	}
-	// Successful parse: track source of overrides.
+	// Apply CLI flag overrides (always, even after a config parse error).
 	if cfg.Style != config.Defaults().Style {
 		src.Style = "config"
 	}
