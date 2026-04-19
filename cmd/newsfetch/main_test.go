@@ -21,9 +21,9 @@ import (
 
 // TestRunDefault_RendersFromFreshCache seeds a cache file under
 // XDG_CACHE_HOME and verifies runDefault prints a boxed story without going
-// near the network. The stale/missing paths need a live upstream or a
-// Source-injection seam that M1 doesn't have yet; they are covered by the
-// manual smoke test in the Definition of Done.
+// near the network. The cold-start and explicit-empty-topics paths are
+// covered by TestRunDefault_ColdStart_* below, which use the newHNSource
+// factory seam added in M2.
 func TestRunDefault_RendersFromFreshCache(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", dir)

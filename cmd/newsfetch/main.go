@@ -116,12 +116,18 @@ const (
 func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind, error) {
 	fs := flag.NewFlagSet("newsfetch", flag.ContinueOnError)
 	fs.SetOutput(errOut)
+	// Suppress stdlib's default usage dump on -h and bad flags; we print
+	// printHelp from exitHelp and a single-line error from main.
+	fs.Usage = func() {}
 	styleFlag := fs.String("style", "", "display mode: boxed | minimal | json")
 	topics := &topicsFlag{}
 	fs.Var(topics, "topics", "comma-separated topic list (explicit empty defeats config)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	showHelp := fs.Bool("help", false, "print usage and exit")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return config.Defaults(), exitHelp, nil
+		}
 		return config.Defaults(), exitRun, err
 	}
 	if *showVersion {
@@ -241,13 +247,13 @@ func spawnRefresh() {
 	if err != nil {
 		return
 	}
+	defer null.Close()
 	cmd := exec.Command(exe, refreshFlag)
 	cmd.Stdin = null
 	cmd.Stdout = null
 	cmd.Stderr = null
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		null.Close()
 		return
 	}
 	_ = cmd.Process.Release()
