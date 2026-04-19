@@ -7,7 +7,7 @@ import "time"
 const (
 	// Version is embedded in the cache's cached_by_version field so future
 	// schema migrations can detect the producing binary.
-	Version = "0.1.0-m1"
+	Version = "0.2.0-m2"
 
 	// BoxWidth caps the boxed render. M1 hardcodes it; M2 will detect the
 	// actual terminal width.
