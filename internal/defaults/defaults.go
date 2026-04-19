@@ -22,6 +22,13 @@ const (
 	// FallbackMessage renders when the cache is missing and the fetcher
 	// fails - for example, offline on first run.
 	FallbackMessage = "no fresh news — check your connection"
+
+	// RankPoolSize is the top-N candidate window for stochastic selection in
+	// the ranker. M2's default.
+	RankPoolSize = 10
+
+	// Style is the default render mode when no config or flag overrides it.
+	Style = "boxed"
 )
 
 const (
