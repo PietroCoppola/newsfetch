@@ -96,6 +96,7 @@ func (h *HackerNews) Fetch(ctx context.Context, opts FetchOptions) ([]Story, err
 			Points:    hit.Points,
 			Author:    hit.Author,
 			CreatedAt: createdAt.UTC(),
+			Tags:      []string{},
 		})
 	}
 	return stories, nil
