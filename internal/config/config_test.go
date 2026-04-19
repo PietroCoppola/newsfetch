@@ -4,7 +4,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
@@ -24,7 +23,6 @@ func TestDefaults(t *testing.T) {
 	if got.Topics != nil {
 		t.Errorf("Topics = %v, want nil", got.Topics)
 	}
-	_ = time.Time{} // keep time import
 }
 
 func TestPath(t *testing.T) {
@@ -36,6 +34,10 @@ func TestPath(t *testing.T) {
 		wantErr bool
 	}{
 		{"xdg absolute", dir, dir + "/newsfetch/config.toml", false},
+		// "empty" and "unset" are the same code path because Path() uses
+		// os.Getenv, which returns "" for both absent and empty-valued
+		// variables. Both cases are listed to document intent; do not
+		// collapse without also verifying Path() still uses os.Getenv.
 		{"xdg empty falls back to home", "", ".config/newsfetch/config.toml", false},
 		{"xdg unset falls back to home", "__UNSET__", ".config/newsfetch/config.toml", false},
 		{"xdg not absolute falls back to home", "relative/path", ".config/newsfetch/config.toml", false},
