@@ -24,7 +24,8 @@
 // # Hot-path discipline
 //
 // Implementations may depend on net/http, encoding/json, and the stdlib time
-// package. Any additional third-party dependency needs justification — see
-// CLAUDE.md in the repo root. The fetcher runs off the render hot path, but
-// binary size still affects startup cost.
+// package. Any additional third-party dependency needs justification: a
+// stdlib alternative considered and ruled out, with the reason recorded in
+// the commit message. The fetcher runs off the render hot path, but binary
+// size still affects startup cost.
 package fetch

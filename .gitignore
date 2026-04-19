@@ -1,2 +1,18 @@
+# Built binary
 /newsfetch
+
+# Local Claude / agent settings and notes (kept out of the public repo)
 /.claude/
+/CLAUDE.md
+/docs/superpowers/
+
+# macOS / editor cruft
+.DS_Store
+
+# Go test and coverage artifacts
+*.test
+coverage.out
+coverage.html
+
+# Local logs
+*.log
