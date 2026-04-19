@@ -57,13 +57,3 @@ func TestRunDefault_RendersFromFreshCache(t *testing.T) {
 		}
 	}
 }
-
-func TestSelectStory_ReturnsFirst(t *testing.T) {
-	stories := []fetch.Story{
-		{ID: "hn-1", Title: "first"},
-		{ID: "hn-2", Title: "second"},
-	}
-	if got := selectStory(stories); got.ID != "hn-1" {
-		t.Errorf("selectStory = %q, want %q", got.ID, "hn-1")
-	}
-}

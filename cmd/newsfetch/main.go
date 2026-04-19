@@ -18,6 +18,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/rank"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
 	"github.com/PietroCoppola/newsfetch/internal/render"
 )
@@ -69,12 +70,15 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	now := time.Now().UTC()
 	f, readErr := cache.Read(path)
 	if readErr == nil && len(f.Stories) > 0 {
-		story := selectStory(f.Stories)
-		fmt.Fprint(out, render.Boxed(story, now, defaults.BoxWidth))
+		story := rank.Select(f.Stories, rank.Options{
+			Topics:   cfg.Topics,
+			Now:      now,
+			PoolSize: defaults.RankPoolSize,
+		}, rng)
+		writeStory(out, story, cfg.Style, now)
 		if !f.IsFresh(cfg.CacheTTL, now) {
 			spawnRefresh()
 		}
-		_ = rng // rng wiring lands in Task 13 when rank.Select is called
 		return nil
 	}
 
@@ -85,8 +89,12 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		fmt.Fprint(out, render.Fallback(defaults.FallbackMessage))
 		return nil
 	}
-	story := selectStory(stories)
-	fmt.Fprint(out, render.Boxed(story, now, defaults.BoxWidth))
+	story := rank.Select(stories, rank.Options{
+		Topics:   cfg.Topics,
+		Now:      now,
+		PoolSize: defaults.RankPoolSize,
+	}, rng)
+	writeStory(out, story, cfg.Style, now)
 	if writeErr := writeCache(path, stories, time.Now().UTC()); writeErr != nil {
 		fmt.Fprintln(errOut, "newsfetch: warning: could not write cache:", writeErr)
 	}
@@ -210,10 +218,19 @@ func writeCache(path string, stories []fetch.Story, at time.Time) error {
 	})
 }
 
-// selectStory is the M1 first-story policy; Task 13 replaces this call
-// site with rank.Select. Kept here unchanged so Task 12 is a pure wiring
-// change with the existing test still passing.
-func selectStory(stories []fetch.Story) fetch.Story { return stories[0] }
+// writeStory dispatches to the renderer named by style. The caller has
+// already validated style to one of the three known values; any other
+// value falls back to boxed (belt-and-suspenders).
+func writeStory(out io.Writer, s fetch.Story, style string, now time.Time) {
+	switch style {
+	case "minimal":
+		fmt.Fprint(out, render.Minimal(s, now))
+	case "json":
+		fmt.Fprint(out, render.JSON(s, now))
+	default:
+		fmt.Fprint(out, render.Boxed(s, now, defaults.BoxWidth))
+	}
+}
 
 func spawnRefresh() {
 	exe, err := os.Executable()
