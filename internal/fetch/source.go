@@ -16,6 +16,11 @@ type Story struct {
 	Points    int       `json:"points"`
 	Author    string    `json:"author"`
 	CreatedAt time.Time `json:"created_at"`
+	// Tags are source-provided topic tags (e.g. from Lobste.rs). HN does
+	// not expose topic tags so HackerNews.Fetch populates an empty slice.
+	// M2's scoring treats empty Tags as "no tag matches"; M4 lands the
+	// 1.5x tags-overlap scoring branch when Lobste.rs is wired up.
+	Tags []string `json:"tags"`
 }
 
 // FetchOptions carries per-call tuning for [Source.Fetch]. The zero value

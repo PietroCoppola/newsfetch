@@ -7,7 +7,7 @@ import "time"
 const (
 	// Version is embedded in the cache's cached_by_version field so future
 	// schema migrations can detect the producing binary.
-	Version = "0.1.0-m1"
+	Version = "0.2.0-m2"
 
 	// BoxWidth caps the boxed render. M1 hardcodes it; M2 will detect the
 	// actual terminal width.
@@ -22,6 +22,13 @@ const (
 	// FallbackMessage renders when the cache is missing and the fetcher
 	// fails - for example, offline on first run.
 	FallbackMessage = "no fresh news — check your connection"
+
+	// RankPoolSize is the top-N candidate window for stochastic selection in
+	// the ranker. M2's default.
+	RankPoolSize = 10
+
+	// Style is the default render mode when no config or flag overrides it.
+	Style = "boxed"
 )
 
 const (

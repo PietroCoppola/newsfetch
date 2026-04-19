@@ -65,6 +65,7 @@ func TestHackerNews_Fetch_Success(t *testing.T) {
 			Points:    150,
 			Author:    "alice",
 			CreatedAt: time.Date(2026, 4, 18, 8, 0, 0, 0, time.UTC),
+			Tags:      []string{},
 		},
 		{
 			ID:        "hn-43",
@@ -74,6 +75,7 @@ func TestHackerNews_Fetch_Success(t *testing.T) {
 			Points:    90,
 			Author:    "bob",
 			CreatedAt: time.Date(2026, 4, 18, 7, 30, 0, 0, time.UTC),
+			Tags:      []string{},
 		},
 	}
 	if !reflect.DeepEqual(stories, want) {
