@@ -1,6 +1,7 @@
 package render_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -175,4 +176,48 @@ func splitLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+func TestMinimal_Basic(t *testing.T) {
+	now := time.Date(2026, 4, 18, 10, 0, 0, 0, time.UTC)
+	s := fetch.Story{
+		Title:     "React 21 drops with native signals",
+		URL:       "https://reactjs.org/blog/2026/react-21",
+		Author:    "alice",
+		CreatedAt: now.Add(-2 * time.Hour),
+	}
+	got := render.Minimal(s, now)
+	want := " React 21 drops with native signals · reactjs.org · 2h ago · by alice\n"
+	if got != want {
+		t.Errorf("Minimal mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestMinimal_OmitsAuthorWhenEmpty(t *testing.T) {
+	now := time.Date(2026, 4, 18, 10, 0, 0, 0, time.UTC)
+	s := fetch.Story{
+		Title:     "Short title",
+		URL:       "https://example.com/x",
+		Author:    "",
+		CreatedAt: now.Add(-5 * time.Minute),
+	}
+	got := render.Minimal(s, now)
+	want := " Short title · example.com · 5m ago\n"
+	if got != want {
+		t.Errorf("Minimal mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestMinimal_StripsWWW(t *testing.T) {
+	now := time.Date(2026, 4, 18, 10, 0, 0, 0, time.UTC)
+	s := fetch.Story{
+		Title:     "Title",
+		URL:       "https://www.example.com/path",
+		Author:    "alice",
+		CreatedAt: now.Add(-1 * time.Hour),
+	}
+	got := render.Minimal(s, now)
+	if !strings.Contains(got, "· example.com ·") {
+		t.Errorf("Minimal did not strip www: %q", got)
+	}
 }
