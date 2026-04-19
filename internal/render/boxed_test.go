@@ -1,6 +1,7 @@
 package render_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -219,5 +220,74 @@ func TestMinimal_StripsWWW(t *testing.T) {
 	got := render.Minimal(s, now)
 	if !strings.Contains(got, "· example.com ·") {
 		t.Errorf("Minimal did not strip www: %q", got)
+	}
+}
+
+func TestJSON_Keys(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	s := fetch.Story{
+		ID:        "hn-1",
+		Title:     "React 21 drops",
+		URL:       "https://reactjs.org/",
+		Source:    "hackernews",
+		Points:    420,
+		Author:    "alice",
+		CreatedAt: now.Add(-2 * time.Hour),
+		Tags:      []string{},
+	}
+	out := render.JSON(s, now)
+	if !strings.HasSuffix(out, "\n") {
+		t.Errorf("JSON output should end with newline: %q", out)
+	}
+	var got struct {
+		Title      string   `json:"title"`
+		URL        string   `json:"url"`
+		Source     string   `json:"source"`
+		AgeSeconds int64    `json:"age_seconds"`
+		Tags       []string `json:"tags"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v; output was %q", err, out)
+	}
+	if got.Title != s.Title || got.URL != s.URL || got.Source != s.Source {
+		t.Errorf("header fields wrong: %+v", got)
+	}
+	if got.AgeSeconds != 7200 {
+		t.Errorf("AgeSeconds = %d, want 7200", got.AgeSeconds)
+	}
+	if got.Tags == nil || len(got.Tags) != 0 {
+		t.Errorf("Tags = %+v, want empty non-nil slice", got.Tags)
+	}
+}
+
+func TestJSON_TagsEmptyNotNull(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	s := fetch.Story{
+		Title:     "x",
+		URL:       "https://x",
+		Source:    "hackernews",
+		CreatedAt: now,
+		Tags:      nil, // nil on input should still serialize as []
+	}
+	out := render.JSON(s, now)
+	if strings.Contains(out, `"tags":null`) {
+		t.Errorf("JSON must emit tags:[] not tags:null; got %q", out)
+	}
+	if !strings.Contains(out, `"tags":[]`) {
+		t.Errorf("expected tags:[] in %q", out)
+	}
+}
+
+func TestJSON_AgeSecondsIsInt64NotFloat(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 1, time.UTC)
+	s := fetch.Story{CreatedAt: now.Add(-90 * time.Second)}
+	out := render.JSON(s, now)
+	// A JSON integer has no decimal point. Even for values that round
+	// exactly, an int64-typed field in Go serializes without one.
+	if strings.Contains(out, `"age_seconds":90.`) {
+		t.Errorf("age_seconds should be int64, not float: %q", out)
+	}
+	if !strings.Contains(out, `"age_seconds":90`) {
+		t.Errorf("expected age_seconds:90 in %q", out)
 	}
 }
