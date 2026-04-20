@@ -234,7 +234,7 @@ func writeStory(out io.Writer, s fetch.Story, style string, now time.Time) {
 	case "json":
 		fmt.Fprint(out, render.JSON(s, now))
 	default:
-		fmt.Fprint(out, render.Boxed(s, now, defaults.BoxWidth))
+		fmt.Fprint(out, render.Boxed(s, now, defaults.TermWidth(defaults.BoxWidth)))
 	}
 }
 
