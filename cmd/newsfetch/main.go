@@ -18,12 +18,16 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/rank"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
 	"github.com/PietroCoppola/newsfetch/internal/render"
 )
 
-const refreshFlag = "--__refresh"
+const (
+	refreshFlag = "--__refresh"
+	initFlag    = "--init"
+)
 
 // newHNSource is the factory for the default HN source. Tests MAY swap
 // this to return an httptest-backed source, but MUST restore via
@@ -39,11 +43,35 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == initFlag {
+		if err := runInit(os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "newsfetch:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	if err := runDefault(os.Stdout, os.Stderr, os.Args[1:], rng); err != nil {
 		fmt.Fprintln(os.Stderr, "newsfetch:", err)
 		os.Exit(1)
 	}
+}
+
+// runInit wires onboard.InitFlow to its production dependencies. The warm-
+// cache step calls runDefault in-process — simpler than re-execing ourselves
+// and avoids a second flag parse — but its output is suppressed (the user
+// already sees install status; rendering a story on top would be noise).
+func runInit(out, errOut io.Writer) error {
+	return onboard.InitFlow(onboard.InitDeps{
+		ConfigPath: config.Path,
+		Shell:      onboard.Detect,
+		Answers:    onboard.RunWizard,
+		Out:        out,
+		WarmCache: func() error {
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			return runDefault(io.Discard, errOut, nil, rng)
+		},
+	})
 }
 
 // runDefault is the hot path. It parses flags, loads and validates config,
@@ -171,6 +199,7 @@ Render one piece of tech news. Run without flags for the default boxed panel.
 Flags:
   --style=<mode>    display mode: boxed (default) | minimal | json
   --topics=<list>   comma-separated topics; explicit empty defeats config
+  --init            interactive setup: pick topics, style, patch shell rc
   --version         print version and exit
   --help            print usage and exit
 `)
