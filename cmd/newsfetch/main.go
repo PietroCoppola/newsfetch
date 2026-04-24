@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	refreshFlag = "--__refresh"
-	initFlag    = "--init"
+	refreshFlag   = "--__refresh"
+	initFlag      = "--init"
+	uninstallFlag = "--uninstall"
 )
 
 // newHNSource is the factory for the default HN source. Tests MAY swap
@@ -45,6 +46,13 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == initFlag {
 		if err := runInit(os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "newsfetch:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == uninstallFlag {
+		if err := runUninstall(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "newsfetch:", err)
 			os.Exit(1)
 		}
@@ -71,6 +79,18 @@ func runInit(out, errOut io.Writer) error {
 			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 			return runDefault(io.Discard, errOut, nil, rng)
 		},
+	})
+}
+
+// runUninstall removes the shell rc block. Config and cache are left in
+// place — see onboard.UninstallFlow. Not reversible but easy to verify
+// (the removed block is a known five lines).
+func runUninstall(out io.Writer) error {
+	return onboard.UninstallFlow(onboard.UninstallDeps{
+		ConfigPath: config.Path,
+		CachePath:  cache.Path,
+		Shell:      onboard.Detect,
+		Out:        out,
 	})
 }
 
@@ -200,6 +220,7 @@ Flags:
   --style=<mode>    display mode: boxed (default) | minimal | json
   --topics=<list>   comma-separated topics; explicit empty defeats config
   --init            interactive setup: pick topics, style, patch shell rc
+  --uninstall       remove the newsfetch block from your shell rc
   --version         print version and exit
   --help            print usage and exit
 `)
