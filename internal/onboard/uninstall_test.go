@@ -86,6 +86,65 @@ func TestUninstallFlow_MissingRCIsNoOp(t *testing.T) {
 	}
 }
 
+func TestUninstallFlow_ConfirmYesRemovesConfigAndCache(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	cachePath := filepath.Join(dir, "cache.json")
+	rcPath := filepath.Join(dir, ".bashrc")
+	for _, p := range []string{configPath, cachePath} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(rcPath, []byte(BeginMarker+"\nnewsfetch\n"+EndMarker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := &bytes.Buffer{}
+	deps := newUninstallDeps(configPath, cachePath, rcPath, out)
+	prompts := 0
+	deps.Confirm = func(prompt string) bool {
+		prompts++
+		return true
+	}
+	if err := UninstallFlow(deps); err != nil {
+		t.Fatalf("UninstallFlow: %v", err)
+	}
+	if prompts != 2 {
+		t.Errorf("Confirm calls = %d, want 2 (config + cache)", prompts)
+	}
+	for _, p := range []string{configPath, cachePath} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed", p)
+		}
+	}
+}
+
+func TestUninstallFlow_ConfirmNoLeavesFilesInPlace(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	cachePath := filepath.Join(dir, "cache.json")
+	rcPath := filepath.Join(dir, ".bashrc")
+	for _, p := range []string{configPath, cachePath} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(rcPath, []byte(BeginMarker+"\nnewsfetch\n"+EndMarker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := &bytes.Buffer{}
+	deps := newUninstallDeps(configPath, cachePath, rcPath, out)
+	deps.Confirm = func(prompt string) bool { return false }
+	if err := UninstallFlow(deps); err != nil {
+		t.Fatalf("UninstallFlow: %v", err)
+	}
+	for _, p := range []string{configPath, cachePath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s should remain after declined prompt: %v", p, err)
+		}
+	}
+}
+
 func TestUninstallFlow_ReportsRemainingPaths(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

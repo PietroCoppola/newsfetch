@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -11,8 +12,11 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/PietroCoppola/newsfetch/internal/cache"
 	"github.com/PietroCoppola/newsfetch/internal/config"
@@ -82,16 +86,42 @@ func runInit(out, errOut io.Writer) error {
 	})
 }
 
-// runUninstall removes the shell rc block. Config and cache are left in
-// place — see onboard.UninstallFlow. Not reversible but easy to verify
-// (the removed block is a known five lines).
+// runUninstall removes the shell rc block and offers (interactively, when
+// stdin is a TTY) to also remove the config and cache files. Non-interactive
+// runs default to "no" so scripts that pipe newsfetch don't hang waiting for
+// input. The rc block removal itself is unconditional — that's the user's
+// stated intent by invoking --uninstall.
 func runUninstall(out io.Writer) error {
 	return onboard.UninstallFlow(onboard.UninstallDeps{
 		ConfigPath: config.Path,
 		CachePath:  cache.Path,
 		Shell:      onboard.Detect,
 		Out:        out,
+		Confirm:    promptYesNo(os.Stdin, out),
 	})
+}
+
+// promptYesNo returns a Confirm function for UninstallFlow. If in is a TTY,
+// the user is asked y/N for each item. If in is not a TTY (script, pipe),
+// the function returns true unconditionally — without an observer to ask,
+// `--uninstall` is read literally as "remove everything". Leaving config and
+// cache behind silently in that case is worse than removing them: the user
+// would never see the "left in place" message and would just have orphaned
+// files.
+func promptYesNo(in *os.File, out io.Writer) func(string) bool {
+	if !term.IsTerminal(int(in.Fd())) {
+		return func(string) bool { return true }
+	}
+	reader := bufio.NewReader(in)
+	return func(prompt string) bool {
+		fmt.Fprintf(out, "%s [y/N] ", prompt)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return false
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		return answer == "y" || answer == "yes"
+	}
 }
 
 // runDefault is the hot path. It parses flags, loads and validates config,

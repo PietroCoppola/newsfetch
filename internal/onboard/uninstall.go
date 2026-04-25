@@ -14,6 +14,10 @@ type UninstallDeps struct {
 	CachePath  func() (string, error)
 	Shell      func() (Shell, error)
 	Out        io.Writer
+	// Confirm asks the user a yes/no question. nil (or one that always
+	// returns false) preserves the legacy "leave files in place" behaviour
+	// — important for non-TTY invocations where prompting would hang.
+	Confirm func(prompt string) bool
 }
 
 // UninstallFlow removes the newsfetch block from the user's rc file, if
@@ -53,13 +57,27 @@ func UninstallFlow(d UninstallDeps) error {
 		return fmt.Errorf("read rc: %w", err)
 	}
 
-	// Report what we deliberately didn't touch, so the user can clean up if
-	// they actually want a full wipe.
-	if _, err := os.Stat(configPath); err == nil {
-		fmt.Fprintf(d.Out, "newsfetch: config left in place at %s (rm to remove)\n", configPath)
-	}
-	if _, err := os.Stat(cachePath); err == nil {
-		fmt.Fprintf(d.Out, "newsfetch: cache left in place at %s (rm to remove)\n", cachePath)
-	}
+	maybeRemove(d, configPath, "config")
+	maybeRemove(d, cachePath, "cache")
 	return nil
+}
+
+// maybeRemove prompts the user (when a Confirm is provided) and removes path
+// if they say yes. Without a Confirm the file is left in place and its path
+// printed, matching the original non-interactive behaviour. Removal failures
+// degrade to a warning rather than a hard error — uninstall has already done
+// its main job (rc patch reverted) by the time we get here.
+func maybeRemove(d UninstallDeps, path, label string) {
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	if d.Confirm == nil || !d.Confirm(fmt.Sprintf("Remove %s at %s?", label, path)) {
+		fmt.Fprintf(d.Out, "newsfetch: %s left in place at %s (rm to remove)\n", label, path)
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		fmt.Fprintf(d.Out, "newsfetch: warning: could not remove %s at %s: %v\n", label, path, err)
+		return
+	}
+	fmt.Fprintf(d.Out, "newsfetch: removed %s at %s\n", label, path)
 }
