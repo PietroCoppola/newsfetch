@@ -12,7 +12,7 @@ import (
 // already exists. The flow refuses rather than repairing partial state — see
 // CLAUDE.md / spec.md discussion: repair logic is a bug magnet, and the user
 // can always rerun --init after deleting the offending file.
-var ErrAlreadyInstalled = errors.New("newsfetch is already installed")
+var ErrAlreadyInstalled = errors.New("already installed")
 
 // InitDeps wires InitFlow to its dependencies. Production constructs one with
 // the real implementations; tests inject stubs so they can run in a tempdir
@@ -39,8 +39,13 @@ func InitFlow(d InitDeps) error {
 		return err
 	}
 
-	if existing := preExisting(configPath, sh.RCPath); existing != "" {
-		return fmt.Errorf("%w: %s", ErrAlreadyInstalled, existing)
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("%w: config already exists at %s — rm it to start over, or edit it directly", ErrAlreadyInstalled, configPath)
+	}
+	if data, err := os.ReadFile(sh.RCPath); err == nil {
+		if _, _, ok := findBlock(string(data)); ok {
+			return fmt.Errorf("%w: shell rc already patched at %s — run `newsfetch --uninstall` first", ErrAlreadyInstalled, sh.RCPath)
+		}
 	}
 
 	answers, err := d.Answers()
@@ -64,21 +69,6 @@ func InitFlow(d InitDeps) error {
 		fmt.Fprintf(d.Out, "newsfetch: warm-cache step failed (%v); next terminal open will retry\n", err)
 	}
 	return nil
-}
-
-// preExisting returns a human-readable description of the first pre-existing
-// piece of newsfetch state it finds, or "" if neither config nor rc-block is
-// present. Used to construct the ErrAlreadyInstalled message.
-func preExisting(configPath, rcPath string) string {
-	if _, err := os.Stat(configPath); err == nil {
-		return configPath
-	}
-	if data, err := os.ReadFile(rcPath); err == nil {
-		if _, _, ok := findBlock(string(data)); ok {
-			return rcPath
-		}
-	}
-	return ""
 }
 
 // PatchRC reads rcPath, inserts (or refreshes) the newsfetch block, and writes

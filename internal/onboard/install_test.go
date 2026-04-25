@@ -93,6 +93,9 @@ func TestInitFlow_RefusesWhenConfigExists(t *testing.T) {
 	if !strings.Contains(err.Error(), configPath) {
 		t.Errorf("error should name the config path; got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "rm") {
+		t.Errorf("error should tell the user how to recover (rm); got: %v", err)
+	}
 
 	// Existing config must be untouched.
 	got, _ := os.ReadFile(configPath)
@@ -117,6 +120,9 @@ func TestInitFlow_RefusesWhenRCBlockExists(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), rcPath) {
 		t.Errorf("error should name the rc path; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--uninstall") {
+		t.Errorf("error should tell the user to run --uninstall; got: %v", err)
 	}
 
 	// Config must NOT have been written (refusal happens pre-write).
