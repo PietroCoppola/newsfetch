@@ -48,36 +48,56 @@ func pickWeightedIndex(weights []float64, rng *rand.Rand) int {
 //
 //	score = (points / (age_hours + 2)^1.8) * topic_multiplier
 //
-// topic_multiplier is 2.0 when any configured topic matches the title,
-// else 1.0. The spec's 1.5x tags-overlap branch is deferred to M4 (see
-// design spec §2, resolved ambiguity #2).
+// topic_multiplier is 2.0 when any configured topic matches the story's
+// matching surface (title plus tags), else 1.0. M4 widened "matches the
+// title" to "matches the title or any tag" so source-provided tags from
+// Lobste.rs (and future tagged sources) contribute to topic relevance
+// without per-source branches in the ranker. The 2.0x multiplier
+// therefore now fires on signals invisible to the user (tags), which is
+// intentional — the cleaner semantic is "topic matched any of the
+// story's relevance signals", and HN stories carry empty Tags so their
+// behaviour is unchanged.
 func Score(s fetch.Story, topics []string, now time.Time) float64 {
 	ageHours := now.Sub(s.CreatedAt).Hours()
 	if ageHours < 0 {
 		ageHours = 0
 	}
 	base := float64(s.Points) / math.Pow(ageHours+2, 1.8)
-	if matchesAnyTopic(s.Title, topics) {
+	if matchesAnyTopic(s, topics) {
 		return base * 2.0
 	}
 	return base
 }
 
-// matchesAnyTopic reports whether any topic matches the title.
+// matchesAnyTopic reports whether any topic matches the story's matching
+// surface, where the surface is the title joined with the tags by a
+// newline separator. The newline:
 //
-// Single-word topic (no whitespace): split title on non-alphanumeric,
-// lowercase, exact token match.
+//   - is a non-word character so tokenize splits cleanly on it;
+//   - cannot legitimately appear in a topic string the user typed, so a
+//     multi-word topic substring search will never match across the
+//     title|tag seam (preventing e.g. topic "machine learning" matching
+//     a story with title ending in "machine" and a tag "learning").
+//
+// Single-word topic (no whitespace): tokenize the surface and require an
+// exact token match. This is what makes topic "as" not match "wasm" —
+// "wasm" is a single token, not "w" + "as" + "m".
 //
 // Multi-word topic (contains whitespace, e.g. "machine learning"): case-
-// insensitive substring match against the full title. M4 must not
-// regress this into token match when adding the 1.5x tags branch —
-// the tests in TestScore_TopicMatchTable guard this.
-func matchesAnyTopic(title string, topics []string) bool {
+// insensitive substring match against the lowercased surface. Multi-word
+// tags are uncommon in practice but if one appears (e.g. Lobsters tag
+// "open source") the tokenizer treats it as multiple terms, which gives
+// the right answer for single-word topics matching either word.
+func matchesAnyTopic(s fetch.Story, topics []string) bool {
 	if len(topics) == 0 {
 		return false
 	}
-	titleLower := strings.ToLower(title)
-	var tokens []string // lazy — only build for single-word topics
+	surface := s.Title
+	if len(s.Tags) > 0 {
+		surface = s.Title + "\n" + strings.Join(s.Tags, "\n")
+	}
+	surfaceLower := strings.ToLower(surface)
+	var tokens []string // lazy — only built when a single-word topic appears
 	for _, t := range topics {
 		t = strings.TrimSpace(t)
 		if t == "" {
@@ -85,13 +105,13 @@ func matchesAnyTopic(title string, topics []string) bool {
 		}
 		tLower := strings.ToLower(t)
 		if strings.ContainsAny(tLower, " \t") {
-			if strings.Contains(titleLower, tLower) {
+			if strings.Contains(surfaceLower, tLower) {
 				return true
 			}
 			continue
 		}
 		if tokens == nil {
-			tokens = tokenize(title)
+			tokens = tokenize(surface)
 		}
 		for _, tok := range tokens {
 			if tok == tLower {

@@ -115,6 +115,111 @@ func TestScore_TopicMatchTable(t *testing.T) {
 	}
 }
 
+// TestScore_TopicMatchWithTags exercises the M4 source-agnostic topic matcher.
+// The matching surface is the title plus the story's Tags joined into one
+// string, so a topic can match either a title token or a tag. Empty Tags
+// must behave identically to pre-M4 (the existing TestScore_TopicMatchTable
+// is the regression guard for the HN-style title-only path; this table adds
+// the tag-matching cases that Lobste.rs needs).
+func TestScore_TopicMatchWithTags(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		title   string
+		tags    []string
+		topics  []string
+		wantMul float64
+	}{
+		{
+			name:    "tag-only single-word match",
+			title:   "Belt-driven autobikes",
+			tags:    []string{"security"},
+			topics:  []string{"security"},
+			wantMul: 2.0,
+		},
+		{
+			name:    "title and tag both match — single boost, not double",
+			title:   "Rust security audit results",
+			tags:    []string{"rust", "security"},
+			topics:  []string{"rust"},
+			wantMul: 2.0,
+		},
+		{
+			name:    "tag match is case-insensitive",
+			title:   "x",
+			tags:    []string{"AI"},
+			topics:  []string{"ai"},
+			wantMul: 2.0,
+		},
+		{
+			name:    "no match in title or tags",
+			title:   "React 21 lands",
+			tags:    []string{"javascript", "frontend"},
+			topics:  []string{"rust"},
+			wantMul: 1.0,
+		},
+		{
+			name:    "topic 'as' must not match token 'wasm'",
+			title:   "wasm runtime improvements",
+			tags:    nil,
+			topics:  []string{"as"},
+			wantMul: 1.0,
+		},
+		{
+			name:    "topic 'as' must not match tag containing 'as'",
+			title:   "x",
+			tags:    []string{"wasm"},
+			topics:  []string{"as"},
+			wantMul: 1.0,
+		},
+		{
+			name:    "multi-word topic must not match across the title|tag seam",
+			title:   "intro to machine",
+			tags:    []string{"learning"},
+			topics:  []string{"machine learning"},
+			wantMul: 1.0,
+		},
+		{
+			name:    "multi-word tag tokenizes — single-word topic matches one of its tokens",
+			title:   "x",
+			tags:    []string{"machine learning"},
+			topics:  []string{"learning"},
+			wantMul: 2.0,
+		},
+		{
+			name:    "empty tags behaves like pre-M4",
+			title:   "Rust 1.87 lands",
+			tags:    []string{},
+			topics:  []string{"rust"},
+			wantMul: 2.0,
+		},
+		{
+			name:    "nil tags behaves like pre-M4",
+			title:   "Rust 1.87 lands",
+			tags:    nil,
+			topics:  []string{"rust"},
+			wantMul: 2.0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fetch.Story{
+				Title:     tc.title,
+				Tags:      tc.tags,
+				Points:    100,
+				CreatedAt: now.Add(-1 * time.Hour),
+			}
+			base := Score(fetch.Story{Title: tc.title, Tags: tc.tags, Points: 100, CreatedAt: now.Add(-1 * time.Hour)}, nil, now)
+			got := Score(s, tc.topics, now)
+			gotMul := got / base
+			if gotMul != tc.wantMul {
+				t.Errorf("multiplier for title=%q tags=%v topics=%v = %f, want %f",
+					tc.title, tc.tags, tc.topics, gotMul, tc.wantMul)
+			}
+		})
+	}
+}
+
 func TestScore_AgeDecay(t *testing.T) {
 	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
 	young := fetch.Story{Title: "x", Points: 100, CreatedAt: now.Add(-1 * time.Hour)}
