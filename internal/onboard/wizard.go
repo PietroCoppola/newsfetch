@@ -105,17 +105,14 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 	}
 	form := huh.NewForm(
 		huh.NewGroup(
+			// Content config first (topics + sources): what news, from where.
+			// Presentation config last (style): how it renders.
 			huh.NewMultiSelect[string]().
 				Title("Topics").
 				Description("These bias which stories surface. Leave empty to see whatever's hot.").
 				Filterable(false).
 				Options(topicOptions...).
 				Value(&a.Topics),
-			huh.NewSelect[string]().
-				Title("Display style").
-				Filtering(false).
-				Options(styleOptions...).
-				Value(&a.Style),
 			huh.NewMultiSelect[string]().
 				Title("Sources").
 				Description("Where to fetch news from. At least one required.").
@@ -128,6 +125,11 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 					return nil
 				}).
 				Value(&a.Sources),
+			huh.NewSelect[string]().
+				Title("Display style").
+				Filtering(false).
+				Options(styleOptions...).
+				Value(&a.Style),
 		),
 	).WithKeyMap(settingsKeyMap())
 	if err := form.Run(); err != nil {
@@ -159,16 +161,37 @@ func initKeyMap() *huh.KeyMap {
 }
 
 // settingsKeyMap is tuned for the 3-field --settings wizard. Standard
-// tab/shift+tab navigation since the "tab cycles between two fields"
-// trick from --init doesn't apply cleanly to three fields. Other huh
-// defaults are kept; only the affordances --init customised stay
-// customised so the two wizards feel consistent.
+// tab/shift+tab navigation: huh doesn't expose a clean way to make tab
+// on the last field cycle back to the first (the public KeyMap is
+// form-level, not per-field, and Next/Submit on the last field can't
+// be redirected without forking huh).
+//
+// The bindings below exist primarily to make the footer help text
+// consistent across all three fields. By default huh shows different
+// labels per field type ("enter confirm" on topics, "enter select" on
+// style, "enter submit" on sources) and leaves the filter binding
+// visible even when Filtering/Filterable is off. We override them so a
+// user reading the footer sees the same vocabulary regardless of which
+// field has focus.
 func settingsKeyMap() *huh.KeyMap {
 	km := huh.NewDefaultKeyMap()
 
 	km.MultiSelect.Toggle = key.NewBinding(key.WithKeys(" ", "x"), key.WithHelp("space/x", "toggle"))
 	km.MultiSelect.SelectAll = key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all"))
-	// Prev and Next stay at huh defaults: shift+tab back, tab/enter forward.
+	km.MultiSelect.Prev = key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "back"))
+	km.MultiSelect.Next = key.NewBinding(key.WithKeys("tab", "enter"), key.WithHelp("tab/enter", "next"))
+	// Submit is enter-only on purpose. Binding tab here would be a footgun:
+	// a user expecting tab to cycle (impossible with huh) would accidentally
+	// submit the form on the last field. Tab on the last field does nothing
+	// (Next is invalid past the last field), which is safer than surprise
+	// submit; enter is the explicit submit gesture, surfaced in the footer.
+	km.MultiSelect.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit"))
+	km.MultiSelect.Filter = key.NewBinding(key.WithDisabled())
+
+	km.Select.Prev = key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "back"))
+	km.Select.Next = key.NewBinding(key.WithKeys("tab", "enter"), key.WithHelp("tab/enter", "next"))
+	km.Select.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit"))
+	km.Select.Filter = key.NewBinding(key.WithDisabled())
 
 	return km
 }
