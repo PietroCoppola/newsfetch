@@ -9,11 +9,22 @@ import (
 	"golang.org/x/term"
 )
 
-const (
-	// Version is embedded in the cache's cached_by_version field so future
-	// schema migrations can detect the producing binary.
-	Version = "0.4.5-m4.5"
+// Version identifies the running binary. Set via -ldflags
+//
+//	-X github.com/PietroCoppola/newsfetch/internal/defaults.Version={{.Version}}
+//
+// at release-build time (see .goreleaser.yaml). Defaults to "dev" so
+// `go install` builds — which don't pass ldflags — get an honest marker
+// rather than a stale string baked at source-edit time. Showing
+// "newsfetch/dev" in upstream User-Agent logs and the cache's
+// cached_by_version field is the right signal for unreleased builds:
+// site operators can tell exactly what's running.
+//
+// Declared as var (not const) so ldflags can override the value. All
+// reads are runtime, so a const-vs-var swap is invisible to callers.
+var Version = "dev"
 
+const (
 	// BoxWidth is the fallback render width used when the terminal size
 	// can't be detected (non-TTY stdout, GetSize error) or when the
 	// detected size falls outside the clamp range. See TermWidth.
