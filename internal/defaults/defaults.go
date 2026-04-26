@@ -12,7 +12,7 @@ import (
 const (
 	// Version is embedded in the cache's cached_by_version field so future
 	// schema migrations can detect the producing binary.
-	Version = "0.4.0-m4"
+	Version = "0.4.5-m4.5"
 
 	// BoxWidth is the fallback render width used when the terminal size
 	// can't be detected (non-TTY stdout, GetSize error) or when the
