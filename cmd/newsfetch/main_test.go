@@ -87,6 +87,32 @@ func algoliaStub() *httptest.Server {
 	}))
 }
 
+func TestFallbackMessage_SingleSourceNamed(t *testing.T) {
+	got := fallbackMessage([]string{"lobsters"})
+	if !strings.Contains(got, "lobsters") {
+		t.Errorf("single-source fallback should name the source; got %q", got)
+	}
+	if !strings.Contains(got, "check your connection") {
+		t.Errorf("fallback should keep the connection hint; got %q", got)
+	}
+}
+
+func TestFallbackMessage_MultiSourceGeneric(t *testing.T) {
+	got := fallbackMessage([]string{"hackernews", "lobsters"})
+	if got != defaults.FallbackMessage {
+		t.Errorf("multi-source fallback = %q, want default %q", got, defaults.FallbackMessage)
+	}
+}
+
+func TestFallbackMessage_NoSourcesGeneric(t *testing.T) {
+	// Defence-in-depth: cfg.Sources should never be empty post-Validate,
+	// but if it ever is, the generic message is the safe choice.
+	got := fallbackMessage(nil)
+	if got != defaults.FallbackMessage {
+		t.Errorf("nil-sources fallback = %q, want default", got)
+	}
+}
+
 func swapHNSource(t *testing.T, url string) {
 	t.Helper()
 	original := newSource

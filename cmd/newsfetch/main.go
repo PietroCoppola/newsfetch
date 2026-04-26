@@ -180,7 +180,7 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
 	}
 	if len(stories) == 0 {
-		fmt.Fprint(out, render.Fallback(defaults.FallbackMessage))
+		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg.Sources)))
 		return nil
 	}
 	story := rank.Select(stories, rank.Options{
@@ -302,6 +302,23 @@ func runRefresh() error {
 		return errors.New("all sources returned no stories")
 	}
 	return writeCache(path, stories, time.Now().UTC())
+}
+
+// fallbackMessage returns the user-facing string for the offline-render
+// branch. With exactly one configured source, name it explicitly so the
+// user knows which provider to investigate; with multiple, stay generic
+// since blaming any one of them would be wrong.
+//
+// "Single source" here means singly-CONFIGURED, not the case where the
+// user has multiple sources but only one is currently failing. M8 polish
+// could distinguish — partial-failure messaging is one of the levers — but
+// for M4 we treat configured-count as the signal because it's stable per
+// invocation and doesn't need to peek at the errs map at the render site.
+func fallbackMessage(sources []string) string {
+	if len(sources) == 1 {
+		return fmt.Sprintf("%s unavailable — check your connection", sources[0])
+	}
+	return defaults.FallbackMessage
 }
 
 // multiFetch instantiates each Source named in cfg.Sources and runs them in
