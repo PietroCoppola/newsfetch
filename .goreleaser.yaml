@@ -1,0 +1,109 @@
+# GoReleaser config for newsfetch.
+#
+# Cuts a release on every `v*` tag pushed to GitHub. Cross-compiles for
+# darwin/amd64, darwin/arm64, linux/amd64, linux/arm64, plus windows/amd64
+# as best-effort (we don't officially support Windows, but cross-compilation
+# is free and a curious user can grab the binary).
+#
+# Run `goreleaser check` locally to validate the config; `goreleaser release
+# --snapshot --clean` builds the artifacts without publishing for smoke
+# testing.
+
+version: 2
+
+project_name: newsfetch
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: newsfetch
+    main: ./cmd/newsfetch
+    binary: newsfetch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Windows on arm64 is technically buildable but we don't have any
+      # use case for it; skip to keep the artifact list focused.
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      # -s -w strip debug symbols (smaller binaries; we have no use for
+      # in-binary debugging on a release build).
+      # The -X flag injects the release version into defaults.Version.
+      # See internal/defaults/defaults.go for the var declaration.
+      - -s
+      - -w
+      - -X github.com/PietroCoppola/newsfetch/internal/defaults.Version={{.Version}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'SHA256SUMS'
+  algorithm: sha256
+
+snapshot:
+  # Snapshot builds (goreleaser release --snapshot) get a synthetic version
+  # so they don't collide with real releases. Distinguishable by suffix.
+  version_template: '{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}'
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - 'merge conflict'
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+
+release:
+  draft: false
+  # prerelease: auto detects tags matching pre-release semver patterns
+  # (e.g. v0.4.6-pre1, v1.0.0-beta) and marks them as pre-releases on
+  # GitHub. Lets us cut v0.4.6-pre1 for pipeline validation without
+  # promoting it to "Latest release".
+  prerelease: auto
+  name_template: '{{ .ProjectName }} {{ .Version }}'
+  footer: |
+    ## Verifying
+
+    Each archive's SHA-256 checksum is in `SHA256SUMS`. Verify with:
+
+    ```
+    sha256sum -c SHA256SUMS    # or `shasum -a 256 -c SHA256SUMS` on macOS
+    ```
+
+    No GPG / cosign signing yet — pre-1.0 project, the public checksum
+    file is the integrity surface. May add signing later.
