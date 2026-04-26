@@ -140,6 +140,25 @@ release:
   # promoting it to "Latest release".
   prerelease: auto
   name_template: '{{ .ProjectName }} {{ .Version }}'
+  # Conditional preamble: v0.4.6 is the first stable binary release and
+  # gets a narrative explaining what newsfetch is + how to install. The
+  # auto-generated changelog below is huge for this tag (no prior tag
+  # to diff against — it dumps every commit in the repo) and reads as
+  # noise without context. Future tags can add their own header block
+  # here or fall through to plain auto-changelog. Remove this clause
+  # whenever it stops being useful.
+  header: |
+    {{- if eq .Tag "v0.4.6" }}
+    **v0.4.6 — first stable binary release.**
+
+    newsfetch is a small CLI that prints one piece of bite-sized tech news every time you open a terminal. Reads from Hacker News and Lobste.rs (opt-in), biased toward topics you tell it you care about.
+
+    This tag consolidates milestones M1 through M4.6: walking skeleton, config + ranking, onboarding wizard, second source, settings editor, and the distribution surface (cross-compiled binaries, install.sh, Homebrew tap).
+
+    Install via the [README's options](https://github.com/PietroCoppola/newsfetch#install) — `curl | sh`, Homebrew, or `go install`. Run `newsfetch --init` after installing to set up topics and patch your shell.
+
+    The auto-changelog below lists the full project history; that's a one-time artifact of this being the first stable tag.
+    {{- end }}
   footer: |
     ## Verifying
 
