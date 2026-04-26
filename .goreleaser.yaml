@@ -88,6 +88,49 @@ changelog:
       - Merge remote-tracking branch
       - Merge branch
 
+homebrew_casks:
+  - name: newsfetch
+    # binaries defaults to [newsfetch] (the cask name). Leave it
+    # auto-inferred — explicit binaries: [newsfetch] would just
+    # repeat the cask name. The deprecated singular binary: form
+    # is removed.
+    repository:
+      owner: PietroCoppola
+      name: homebrew-tap
+      # Token with repo scope on PietroCoppola/homebrew-tap (the default
+      # GITHUB_TOKEN can't push to a different repo). Generated via
+      # https://github.com/settings/tokens, stored as repo secret on
+      # PietroCoppola/newsfetch named HOMEBREW_TAP_GITHUB_TOKEN. Surfaced
+      # to the GoReleaser action via the env: block in release.yml.
+      token: '{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}'
+    homepage: 'https://github.com/PietroCoppola/newsfetch'
+    description: 'A small CLI that prints one piece of bite-sized tech news every time you open a terminal.'
+    license: MIT
+    # Using homebrew_casks: instead of the deprecated brews:. GoReleaser
+    # is phasing brews: out across all use cases including unsigned CLI
+    # binaries (deprecation since v2.10, removal at v3.0). Casks are the
+    # canonical path now even though the brew-conventional cask = GUI
+    # framing predates this.
+    #
+    # Skip publishing the cask on pre-release tags (v0.4.6-pre1, etc.)
+    # — those are pipeline tests, not real releases users should brew
+    # install. Only stable tags update the tap.
+    skip_upload: auto
+    hooks:
+      post:
+        # Strip macOS Gatekeeper's quarantine attribute from the staged
+        # binary. Without this, an unsigned Go binary triggers the
+        # "newsfetch is damaged and can't be opened" dialog on first
+        # run — a confusing failure mode for users who just ran a
+        # successful brew install. Standard escape hatch for unsigned
+        # CLIs distributed via Homebrew. staged_path resolves to the
+        # versioned Caskroom directory; verified against the Cask
+        # Cookbook DSL reference.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/newsfetch"]
+          end
+
 release:
   draft: false
   # prerelease: auto detects tags matching pre-release semver patterns

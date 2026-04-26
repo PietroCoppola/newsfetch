@@ -39,4 +39,13 @@ jobs:
           version: latest
           args: release --clean
         env:
+          # GITHUB_TOKEN: creates the Release on this repo, uploads
+          # archives. Default workflow token (contents: write).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # HOMEBREW_TAP_GITHUB_TOKEN: PAT with repo scope on
+          # PietroCoppola/homebrew-tap, since the default GITHUB_TOKEN
+          # cannot push to a different repo. Required at release time
+          # only when GoReleaser is also publishing the cask. Only
+          # stable tags actually push (skip_upload: auto in
+          # .goreleaser.yaml suppresses pre-release tags).
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
