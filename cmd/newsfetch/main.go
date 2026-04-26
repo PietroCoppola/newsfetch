@@ -83,17 +83,34 @@ func main() {
 // cache step calls runDefault in-process — simpler than re-execing ourselves
 // and avoids a second flag parse — but its output is suppressed (the user
 // already sees install status; rendering a story on top would be noise).
+//
+// Answers source flips on stdin TTY detection: a real terminal gets the
+// huh wizard; a pipe / redirect gets ReadJSONAnswers. Symmetric with
+// --uninstall, which uses TTY detection to decide between interactive
+// prompts and "do the obvious thing without asking".
 func runInit(out, errOut io.Writer) error {
 	return onboard.InitFlow(onboard.InitDeps{
 		ConfigPath: config.Path,
 		Shell:      onboard.Detect,
-		Answers:    onboard.RunWizard,
+		Answers:    pickAnswerSource(os.Stdin),
 		Out:        out,
 		WarmCache: func() error {
 			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 			return runDefault(io.Discard, errOut, nil, rng)
 		},
 	})
+}
+
+// pickAnswerSource returns the function InitFlow will call to collect
+// wizard answers. TTY → interactive huh wizard; non-TTY → JSON parsed
+// from in. The non-TTY path makes scripted install possible:
+//
+//	echo '{"topics":["rust"],"style":"boxed"}' | newsfetch --init
+func pickAnswerSource(in *os.File) func() (onboard.Answers, error) {
+	if term.IsTerminal(int(in.Fd())) {
+		return onboard.RunWizard
+	}
+	return func() (onboard.Answers, error) { return onboard.ReadJSONAnswers(in) }
 }
 
 // runUninstall removes the shell rc block and offers (interactively, when
@@ -271,6 +288,8 @@ Flags:
   --style=<mode>    display mode: boxed (default) | minimal | json
   --topics=<list>   comma-separated topics; explicit empty defeats config
   --init            interactive setup: pick topics, style, patch shell rc
+                    if stdin is not a TTY, reads JSON instead:
+                      {"topics": ["rust"], "style": "boxed"}
   --uninstall       remove the newsfetch block from your shell rc
   --version         print version and exit
   --help            print usage and exit

@@ -27,6 +27,17 @@ bash, or fish) so a story renders on each new terminal.
 
 To remove the shell hook later: `newsfetch --uninstall`.
 
+### Scripted install
+
+`--init` skips the interactive wizard when stdin is not a TTY and reads JSON
+instead. Both fields are required:
+
+```
+echo '{"topics": ["rust", "ai"], "style": "boxed"}' | newsfetch --init
+```
+
+Style must be one of `boxed`, `minimal`, `json`. `topics` may be `[]`.
+
 ## Flags
 
 ```
