@@ -48,3 +48,9 @@ type Source interface {
 	Name() string
 	Fetch(ctx context.Context, opts FetchOptions) ([]Story, error)
 }
+
+// KnownSourceNames lists every Source name the binary recognises. Single
+// source of truth: the config validator uses it to flag unknown source
+// names, and cmd/newsfetch's factory uses it to instantiate Sources by
+// name. Add new sources here when they ship.
+var KnownSourceNames = []string{"hackernews", "lobsters"}

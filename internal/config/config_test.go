@@ -145,7 +145,7 @@ func TestLoad_UnknownKeysIgnored(t *testing.T) {
 	body := `
 style = "minimal"
 dedupe_history = true
-sources = ["hackernews"]
+seen_history_capacity = 500
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -156,6 +156,35 @@ sources = ["hackernews"]
 	}
 	if cfg.Style != "minimal" {
 		t.Errorf("Style = %q, want minimal", cfg.Style)
+	}
+}
+
+func TestLoad_Sources(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"sources unset → defaults", "style = \"boxed\"\n", config.Defaults().Sources},
+		{"sources set → used as-is", "sources = [\"hackernews\", \"lobsters\"]\n", []string{"hackernews", "lobsters"}},
+		{"sources empty list survives Load (Validate handles)", "sources = []\n", []string{}},
+		{"unknown name survives Load (Validate handles)", "sources = [\"weirdsrc\"]\n", []string{"weirdsrc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.Sources, tc.want) {
+				t.Errorf("Sources = %v, want %v", cfg.Sources, tc.want)
+			}
+		})
 	}
 }
 
@@ -233,6 +262,60 @@ func TestValidate_MinPointsNegative(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "min_points=-4") {
 		t.Errorf("warning missing min_points=-4: %q", buf.String())
+	}
+}
+
+func TestValidate_SourcesEmpty(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sources = []string{}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Sources, config.Defaults().Sources) {
+		t.Errorf("Sources = %v, want defaults %v", got.Sources, config.Defaults().Sources)
+	}
+	if !strings.Contains(buf.String(), "sources is empty") {
+		t.Errorf("warning text missing: %q", buf.String())
+	}
+}
+
+func TestValidate_SourcesAllUnknownDropped(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sources = []string{"weirdsrc", "another"}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Sources, config.Defaults().Sources) {
+		t.Errorf("Sources = %v, want defaults", got.Sources)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "no recognised names") || !strings.Contains(out, "weirdsrc") {
+		t.Errorf("warning missing dropped names: %q", out)
+	}
+}
+
+func TestValidate_SourcesPartialUnknownDropped(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sources = []string{"hackernews", "weirdsrc", "lobsters"}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Sources, []string{"hackernews", "lobsters"}) {
+		t.Errorf("Sources = %v, want [hackernews lobsters]", got.Sources)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "weirdsrc") || !strings.Contains(out, "dropped") {
+		t.Errorf("warning missing dropped name: %q", out)
+	}
+}
+
+func TestValidate_SourcesAllValidNoWarning(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sources = []string{"hackernews", "lobsters"}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Sources, []string{"hackernews", "lobsters"}) {
+		t.Errorf("Sources mutated: %v", got.Sources)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected warning: %q", buf.String())
 	}
 }
 

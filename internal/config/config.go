@@ -24,6 +24,11 @@ type Config struct {
 	Style     string        // "boxed" | "minimal" | "json"
 	CacheTTL  time.Duration // derived from cache_ttl_minutes
 	MinPoints int
+	// Sources lists which Source implementations to fetch from, by name.
+	// Names must appear in fetch.KnownSourceNames; Validate drops unknowns
+	// and falls back to defaults if nothing valid remains. M4 default is
+	// ["hackernews"] — Lobste.rs is opt-in via config.
+	Sources []string
 }
 
 // Defaults returns the compile-time fallback config. Validate is a no-op on
@@ -34,6 +39,7 @@ func Defaults() Config {
 		Style:     defaults.Style,
 		CacheTTL:  defaults.CacheTTL,
 		MinPoints: defaults.MinPoints,
+		Sources:   append([]string(nil), defaults.Sources...),
 	}
 }
 
@@ -75,6 +81,7 @@ func Load(path string) (Config, error) {
 		Style           string   `toml:"style"`
 		CacheTTLMinutes int      `toml:"cache_ttl_minutes"`
 		MinPoints       int      `toml:"min_points"`
+		Sources         []string `toml:"sources"`
 	}
 	meta, err := toml.Decode(string(data), &raw)
 	if err != nil {
@@ -92,6 +99,9 @@ func Load(path string) (Config, error) {
 	}
 	if meta.IsDefined("min_points") {
 		cfg.MinPoints = raw.MinPoints
+	}
+	if meta.IsDefined("sources") {
+		cfg.Sources = raw.Sources
 	}
 	return cfg, nil
 }

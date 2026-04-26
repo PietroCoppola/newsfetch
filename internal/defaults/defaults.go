@@ -37,6 +37,12 @@ const (
 	Style = "boxed"
 )
 
+// Sources is the default source list. M4 ships HN-only by default and
+// requires the user to opt into Lobste.rs by editing config.toml.
+// Reasoning: the mixed HN+Lobste.rs pool has differing score scales and
+// volumes; we want to dogfood it before changing the default.
+var Sources = []string{"hackernews"}
+
 const (
 	// CacheTTL is the stale-while-revalidate window. Reads newer than this
 	// render without spawning a background refresh.
