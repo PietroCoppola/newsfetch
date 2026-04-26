@@ -27,16 +27,30 @@ bash, or fish) so a story renders on each new terminal.
 
 To remove the shell hook later: `newsfetch --uninstall`.
 
+To edit your config later (topics, style, sources): `newsfetch --settings`.
+
 ### Scripted install
 
 `--init` skips the interactive wizard when stdin is not a TTY and reads JSON
-instead. Both fields are required:
+instead. `topics` and `style` are required; `sources` is optional (omit it
+to inherit the default):
 
 ```
 echo '{"topics": ["rust", "ai"], "style": "boxed"}' | newsfetch --init
+echo '{"topics": [], "style": "boxed", "sources": ["hackernews", "lobsters"]}' | newsfetch --init
 ```
 
 Style must be one of `boxed`, `minimal`, `json`. `topics` may be `[]`.
+
+### Scripted edit
+
+`--settings` is the equivalent of `--init` for changing your existing
+config. All three fields (`topics`, `style`, `sources`) are required when
+piping JSON; `sources` must be non-empty:
+
+```
+echo '{"topics": ["rust"], "style": "minimal", "sources": ["hackernews"]}' | newsfetch --settings
+```
 
 ## Flags
 

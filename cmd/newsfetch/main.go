@@ -32,6 +32,7 @@ const (
 	refreshFlag   = "--__refresh"
 	initFlag      = "--init"
 	uninstallFlag = "--uninstall"
+	settingsFlag  = "--settings"
 )
 
 // newSource returns the Source implementation for name. Tests MAY swap
@@ -67,6 +68,13 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == uninstallFlag {
 		if err := runUninstall(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "newsfetch:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == settingsFlag {
+		if err := runSettings(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "newsfetch:", err)
 			os.Exit(1)
 		}
@@ -111,6 +119,41 @@ func pickAnswerSource(in *os.File) func() (onboard.Answers, error) {
 		return onboard.RunInitWizard
 	}
 	return func() (onboard.Answers, error) { return onboard.ReadInitJSON(in) }
+}
+
+// runSettings wires onboard.SettingsFlow to its production dependencies.
+// Reads the existing config from disk (errors if missing — --settings is the
+// edit-existing path, --init is the bootstrap path) and routes the answer
+// collection through the wizard or JSON-stdin depending on TTY status.
+func runSettings(out io.Writer) error {
+	return onboard.SettingsFlow(onboard.SettingsDeps{
+		ConfigPath: config.Path,
+		Current: func(path string) (onboard.Answers, error) {
+			cfg, err := config.Load(path)
+			if err != nil {
+				return onboard.Answers{}, err
+			}
+			return onboard.Answers{
+				Topics:  cfg.Topics,
+				Style:   cfg.Style,
+				Sources: cfg.Sources,
+			}, nil
+		},
+		Answers: pickSettingsAnswerSource(os.Stdin),
+		Out:     out,
+	})
+}
+
+// pickSettingsAnswerSource returns the function SettingsFlow will call to
+// collect updated answers. TTY → interactive wizard pre-filled with the
+// caller-provided current values; non-TTY → JSON parsed from in (current is
+// ignored; the JSON shape is authoritative). Symmetric with --init's
+// pickAnswerSource.
+func pickSettingsAnswerSource(in *os.File) func(onboard.Answers) (onboard.Answers, error) {
+	if term.IsTerminal(int(in.Fd())) {
+		return onboard.RunSettingsWizard
+	}
+	return func(_ onboard.Answers) (onboard.Answers, error) { return onboard.ReadSettingsJSON(in) }
 }
 
 // runUninstall removes the shell rc block and offers (interactively, when
@@ -290,6 +333,11 @@ Flags:
   --init            interactive setup: pick topics, style, patch shell rc
                     if stdin is not a TTY, reads JSON instead:
                       {"topics": ["rust"], "style": "boxed"}
+                      sources is optional in --init JSON
+  --settings        edit existing config: topics, style, sources
+                    if stdin is not a TTY, reads JSON instead:
+                      {"topics": ["rust"], "style": "boxed", "sources": ["hackernews"]}
+                      all three fields required
   --uninstall       remove the newsfetch block from your shell rc
   --version         print version and exit
   --help            print usage and exit
