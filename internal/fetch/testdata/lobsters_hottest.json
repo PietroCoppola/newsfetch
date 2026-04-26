@@ -1,0 +1,52 @@
+[
+  {
+    "short_id": "abc123",
+    "created_at": "2026-04-25T10:00:00.000-05:00",
+    "title": "Rust 1.87 lands",
+    "url": "https://blog.rust-lang.org/2026/04/25/Rust-1.87.html",
+    "score": 87,
+    "submitter_user": "alice",
+    "tags": ["rust"],
+    "short_id_url": "https://lobste.rs/s/abc123"
+  },
+  {
+    "short_id": "def456",
+    "created_at": "2026-04-24T22:30:00.000-05:00",
+    "title": "Reverse engineering a Game Boy graphics chip",
+    "url": "https://example.com/gbgfx",
+    "score": 64,
+    "submitter_user": "bob",
+    "tags": ["graphics", "reversing", "retrocomputing"],
+    "short_id_url": "https://lobste.rs/s/def456"
+  },
+  {
+    "short_id": "ask123",
+    "created_at": "2026-04-25T09:00:00.000-05:00",
+    "title": "",
+    "url": "",
+    "score": 12,
+    "submitter_user": "carol",
+    "tags": ["ask"],
+    "short_id_url": "https://lobste.rs/s/ask123"
+  },
+  {
+    "short_id": "txt789",
+    "created_at": "2026-04-25T08:00:00.000-05:00",
+    "title": "A discussion of monorepos at scale",
+    "url": "",
+    "score": 23,
+    "submitter_user": "dave",
+    "tags": ["practices"],
+    "short_id_url": "https://lobste.rs/s/txt789"
+  },
+  {
+    "short_id": "sec999",
+    "created_at": "2026-04-25T06:00:00.000-05:00",
+    "title": "TLS 1.3 handshake gotchas",
+    "url": "https://example.com/tls13",
+    "score": 41,
+    "submitter_user": "eve",
+    "tags": ["security", "cryptography"],
+    "short_id_url": "https://lobste.rs/s/sec999"
+  }
+]

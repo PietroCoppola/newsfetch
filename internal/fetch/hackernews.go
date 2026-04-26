@@ -54,6 +54,7 @@ func (h *HackerNews) Fetch(ctx context.Context, opts FetchOptions) ([]Story, err
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	req.Header.Set("User-Agent", userAgent())
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hn request: %w", err)

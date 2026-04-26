@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,5 +211,26 @@ func TestHackerNews_Fetch_RespectsContextCancel(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want errors.Is(..., context.Canceled)", err)
+	}
+}
+
+func TestHackerNews_Fetch_SendsUserAgent(t *testing.T) {
+	var gotUA string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hits":[]}`))
+	}))
+	defer ts.Close()
+
+	h := &fetch.HackerNews{BaseURL: ts.URL, Client: ts.Client()}
+	if _, err := h.Fetch(context.Background(), fetch.FetchOptions{}); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !strings.HasPrefix(gotUA, "newsfetch/") {
+		t.Errorf("User-Agent = %q, want prefix newsfetch/", gotUA)
+	}
+	if !strings.Contains(gotUA, "github.com/PietroCoppola/newsfetch") {
+		t.Errorf("User-Agent should contain repo URL; got: %q", gotUA)
 	}
 }
