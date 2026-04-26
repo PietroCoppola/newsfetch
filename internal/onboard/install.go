@@ -53,7 +53,7 @@ func InitFlow(d InitDeps) error {
 		return fmt.Errorf("wizard: %w", err)
 	}
 
-	if err := WriteConfig(configPath, answers.Topics, answers.Style); err != nil {
+	if err := WriteConfig(configPath, answers); err != nil {
 		return err
 	}
 	if _, err := PatchRC(sh.RCPath); err != nil {
