@@ -23,18 +23,23 @@ builds:
     binary: newsfetch
     env:
       - CGO_ENABLED=0
+    # Unix-only by intent. The fork-detach refresh in cmd/newsfetch/main.go
+    # uses syscall.SysProcAttr.Setpgid, which doesn't exist in Windows'
+    # syscall package — cross-compiling for Windows fails at build time.
+    # The brief originally listed Windows as best-effort cross-compile;
+    # the v0.4.6-pre1 pipeline run (release log #66275048315) made it
+    # clear that "best-effort" wasn't honest: the cross-compile actively
+    # fails. Build-tagging the Setpgid path Unix-only with a Windows
+    # stub would produce a Windows binary whose async refresh doesn't
+    # work, plus ongoing maintenance — not worth it for hypothetical
+    # Windows users when WSL covers most Windows-on-dev cases. Revisit
+    # only if a real Windows user asks.
     goos:
       - darwin
       - linux
-      - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      # Windows on arm64 is technically buildable but we don't have any
-      # use case for it; skip to keep the artifact list focused.
-      - goos: windows
-        goarch: arm64
     flags:
       - -trimpath
     ldflags:
@@ -57,10 +62,6 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
     files:
       - LICENSE
       - README.md
