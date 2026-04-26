@@ -34,11 +34,21 @@ const (
 	uninstallFlag = "--uninstall"
 )
 
-// newHNSource is the factory for the default HN source. Tests MAY swap
-// this to return an httptest-backed source, but MUST restore via
-// t.Cleanup(func() { newHNSource = original }) to avoid poisoning
-// subsequent tests — failing tests would otherwise leak the swap.
-var newHNSource = func() fetch.Source { return &fetch.HackerNews{} }
+// newSource returns the Source implementation for name. Tests MAY swap
+// this to return httptest-backed sources, but MUST restore via
+// t.Cleanup(func() { newSource = original }) to avoid leaking the swap
+// into other tests. config.Validate guarantees only known names reach
+// this function in production, so the default branch is defence in depth.
+var newSource = func(name string) (fetch.Source, error) {
+	switch name {
+	case "hackernews":
+		return &fetch.HackerNews{}, nil
+	case "lobsters":
+		return &fetch.Lobsters{}, nil
+	default:
+		return nil, fmt.Errorf("unknown source %q", name)
+	}
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == refreshFlag {
@@ -162,8 +172,14 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaults.FetchTimeout)
 	defer cancel()
-	stories, err := hnFetch(ctx, cfg.MinPoints)
+	stories, errs, err := multiFetch(ctx, cfg)
 	if err != nil {
+		return err
+	}
+	for name, e := range errs {
+		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
+	}
+	if len(stories) == 0 {
 		fmt.Fprint(out, render.Fallback(defaults.FallbackMessage))
 		return nil
 	}
@@ -173,6 +189,11 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		PoolSize: defaults.RankPoolSize,
 	}, rng)
 	writeStory(out, story, cfg.Style, now)
+	// Full-replace on partial fetch: a failed source's prior stories drop
+	// out of the cache rather than ghosting indefinitely. Self-healing on
+	// the next fully-successful refresh. Time-bounded merge (per-story TTL
+	// on top of cache TTL) is the right shape if the partial-outage UX
+	// ever feels rough — defer until evidence demands it.
 	if writeErr := writeCache(path, stories, time.Now().UTC()); writeErr != nil {
 		fmt.Fprintln(errOut, "newsfetch: warning: could not write cache:", writeErr)
 	}
@@ -270,29 +291,40 @@ func runRefresh() error {
 	cfg = config.Validate(cfg, config.FieldSources{}, io.Discard)
 	ctx, cancel := context.WithTimeout(context.Background(), defaults.FetchTimeout)
 	defer cancel()
-	stories, err := hnFetch(ctx, cfg.MinPoints)
+	stories, errs, err := multiFetch(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	for name, e := range errs {
+		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
+	}
+	if len(stories) == 0 {
+		return errors.New("all sources returned no stories")
 	}
 	return writeCache(path, stories, time.Now().UTC())
 }
 
-func hnFetch(ctx context.Context, minPoints int) ([]fetch.Story, error) {
-	src := newHNSource()
-	stories, err := src.Fetch(ctx, fetch.FetchOptions{
-		MinPoints: minPoints,
+// multiFetch instantiates each Source named in cfg.Sources and runs them in
+// parallel via fetch.FetchAll. Per-source errors flow back as a name→err
+// map; the caller decides whether to log them, surface to the user, or
+// both. A factory error (unknown source name) is treated as fatal because
+// config.Validate is supposed to filter those out before we get here — if
+// one slips through, that's a bug worth surfacing rather than silently
+// degrading.
+func multiFetch(ctx context.Context, cfg config.Config) ([]fetch.Story, map[string]error, error) {
+	sources := make([]fetch.Source, 0, len(cfg.Sources))
+	for _, name := range cfg.Sources {
+		src, err := newSource(name)
+		if err != nil {
+			return nil, nil, err
+		}
+		sources = append(sources, src)
+	}
+	stories, errs := fetch.FetchAll(ctx, sources, fetch.FetchOptions{
+		MinPoints: cfg.MinPoints,
 		Limit:     defaults.NumStories,
 	})
-	if err != nil {
-		return nil, err
-	}
-	if len(stories) == 0 {
-		// Zero-hits ≠ API error, but M2 folds both into the same
-		// fallback. M8 polish may distinguish ("No stories matched"
-		// vs "check your connection").
-		return nil, errors.New("hn returned no stories")
-	}
-	return stories, nil
+	return stories, errs, nil
 }
 
 func writeCache(path string, stories []fetch.Story, at time.Time) error {

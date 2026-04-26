@@ -89,9 +89,16 @@ func algoliaStub() *httptest.Server {
 
 func swapHNSource(t *testing.T, url string) {
 	t.Helper()
-	original := newHNSource
-	newHNSource = func() fetch.Source { return &fetch.HackerNews{BaseURL: url} }
-	t.Cleanup(func() { newHNSource = original })
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		switch name {
+		case "hackernews":
+			return &fetch.HackerNews{BaseURL: url}, nil
+		default:
+			return original(name)
+		}
+	}
+	t.Cleanup(func() { newSource = original })
 }
 
 // TestRunDefault_ColdStart_FetchesAndCaches covers the cold-start wiring:
