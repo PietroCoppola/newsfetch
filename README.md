@@ -8,12 +8,44 @@ way.
 
 ## Install
 
+Use whichever path matches what you already have installed. They land
+the same binary; the differences are only in how it gets there.
+
+### Easy install (macOS, Linux) — no Go required
+
+```
+curl -fsSL https://raw.githubusercontent.com/PietroCoppola/newsfetch/main/install.sh | sh
+```
+
+Detects your OS and architecture, downloads the matching binary from
+the [latest release](https://github.com/PietroCoppola/newsfetch/releases/latest),
+verifies its SHA-256 against the published checksum, and installs to
+`/usr/local/bin`. Read the
+[script](https://github.com/PietroCoppola/newsfetch/blob/main/install.sh)
+before piping to `sh` if you'd rather know what it does.
+
+### Homebrew (macOS, Linux)
+
+```
+brew install PietroCoppola/tap/newsfetch
+```
+
+### Manual binary download
+
+Grab the appropriate archive from the
+[latest release](https://github.com/PietroCoppola/newsfetch/releases/latest),
+verify the checksum against `SHA256SUMS`, and move the extracted
+binary to a directory on your `$PATH`.
+
+### From source (requires Go 1.25+)
+
 ```
 go install github.com/PietroCoppola/newsfetch/cmd/newsfetch@latest
 ```
 
-The binary lands in `$GOBIN` (or `$HOME/go/bin`). Make sure that's on your
-`$PATH`.
+The binary lands in `$GOBIN` (or `$HOME/go/bin` if `$GOBIN` is unset).
+Verify that directory is on your `$PATH`; if not, add it to your shell
+rc file.
 
 ## Quickstart
 
@@ -58,6 +90,7 @@ echo '{"topics": ["rust"], "style": "minimal", "sources": ["hackernews"]}' | new
 --style=<mode>    boxed (default) | minimal | json
 --topics=<list>   comma-separated; explicit empty defeats config
 --init            interactive setup
+--settings        edit existing config (topics, style, sources)
 --uninstall       remove the shell hook
 --version
 --help
