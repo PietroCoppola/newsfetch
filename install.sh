@@ -117,7 +117,55 @@ else
    curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh"
 fi
 
-# --- Step 6: report ----------------------------------------------------------
+# --- Step 6: PATH sanity check ------------------------------------------------
+
+# /usr/local/bin is on $PATH by default on every mainstream OS we target,
+# but a user with an unusual environment can install successfully and then
+# hit "command not found" when they type the binary name. Cheaper to warn
+# now than to debug later.
+case ":$PATH:" in
+	*":$INSTALL_DIR:"*) ;;
+	*)
+		# Literal '$PATH' inside the printf format strings below is the
+		# text we want the user to copy into their rc file — it must not
+		# expand here. Disable SC2016 across the block.
+		# shellcheck disable=SC2016
+		printf 'install: warning: %s is not in $PATH; you may need to add it\n' "$INSTALL_DIR"
+		# Shell-specific recipe. $SHELL is the user's login shell; the
+		# rc-file path and export syntax both depend on it.
+		# Each printed echo command uses single quotes around its argument
+		# so the shell that runs it writes the literal '$PATH' into the
+		# rc file, not the expanded value at copy-paste time. The rc file
+		# then expands $PATH at shell-init time, which is what the user
+		# actually wants.
+		# shellcheck disable=SC2016
+		case "$(basename "${SHELL:-}")" in
+			zsh)
+				printf "  zsh:  echo 'export PATH=\"%s:\$PATH\"' >> ~/.zshrc\n" "$INSTALL_DIR"
+				;;
+			bash)
+				# macOS Terminal opens login shells (sources .bash_profile);
+				# Linux's interactive non-login shells source .bashrc. Same
+				# split as the M3 onboard.detectShell logic.
+				if [ "$OS" = "darwin" ]; then
+					printf "  bash: echo 'export PATH=\"%s:\$PATH\"' >> ~/.bash_profile\n" "$INSTALL_DIR"
+				else
+					printf "  bash: echo 'export PATH=\"%s:\$PATH\"' >> ~/.bashrc\n" "$INSTALL_DIR"
+				fi
+				;;
+			fish)
+				# Fish does not use 'export'. The universal-export 'set -gx'
+				# persists across sessions when written to config.fish.
+				printf "  fish: echo 'set -gx PATH %s \$PATH' >> ~/.config/fish/config.fish\n" "$INSTALL_DIR"
+				;;
+			*)
+				printf '  add %s to $PATH in your shell rc file\n' "$INSTALL_DIR"
+				;;
+		esac
+		;;
+esac
+
+# --- Step 7: report ----------------------------------------------------------
 
 printf 'install: installed %s %s to %s/%s\n' "$BINARY" "$TAG" "$INSTALL_DIR" "$BINARY"
 "$INSTALL_DIR/$BINARY" --version
