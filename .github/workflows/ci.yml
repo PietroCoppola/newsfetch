@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # actions/checkout@v4 and actions/setup-go@v5 still ship Node.js 20,
+  # which GitHub is deprecating (forced to Node.js 24 starting 2026-06-02,
+  # removed 2026-09-16). Opting in early silences the warning and is
+  # forward-compatible. Drop this env var once we move to action versions
+  # that ship Node.js 24 natively.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
