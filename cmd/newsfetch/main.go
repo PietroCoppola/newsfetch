@@ -85,7 +85,7 @@ func main() {
 // already sees install status; rendering a story on top would be noise).
 //
 // Answers source flips on stdin TTY detection: a real terminal gets the
-// huh wizard; a pipe / redirect gets ReadJSONAnswers. Symmetric with
+// huh wizard; a pipe / redirect gets ReadInitJSON. Symmetric with
 // --uninstall, which uses TTY detection to decide between interactive
 // prompts and "do the obvious thing without asking".
 func runInit(out, errOut io.Writer) error {
@@ -108,9 +108,9 @@ func runInit(out, errOut io.Writer) error {
 //	echo '{"topics":["rust"],"style":"boxed"}' | newsfetch --init
 func pickAnswerSource(in *os.File) func() (onboard.Answers, error) {
 	if term.IsTerminal(int(in.Fd())) {
-		return onboard.RunWizard
+		return onboard.RunInitWizard
 	}
-	return func() (onboard.Answers, error) { return onboard.ReadJSONAnswers(in) }
+	return func() (onboard.Answers, error) { return onboard.ReadInitJSON(in) }
 }
 
 // runUninstall removes the shell rc block and offers (interactively, when

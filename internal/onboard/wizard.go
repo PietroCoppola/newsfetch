@@ -5,17 +5,23 @@ import (
 	"github.com/charmbracelet/huh"
 )
 
-// Answers captures the wizard's output. Kept as a plain struct so tests can
-// build canned answers without invoking the TUI.
+// Answers captures wizard / JSON-stdin output for both --init and --settings.
+// Sources is nil-vs-non-nil sensitive: nil means "the caller did not specify
+// sources" (config writers omit the field so future default changes flow
+// through), non-nil means "use exactly these" (config writers emit the line).
 type Answers struct {
-	Topics []string
-	Style  string
+	Topics  []string
+	Style   string
+	Sources []string // nil → omit from config; non-nil → emit verbatim
 }
 
-// RunWizard drives the interactive --init UI: a topic multi-select followed
-// by a display-style picker. Returns the user's choices (or huh.ErrUserAborted
-// if they cancel). Not unit-tested — the TUI is exercised via manual smoke.
-func RunWizard() (Answers, error) {
+// RunInitWizard drives the interactive --init UI: a topic multi-select
+// followed by a display-style picker. Sources is intentionally not surfaced —
+// --init is the opinionated onboarding contract; users opt into source
+// selection via --settings or the JSON-stdin power-user path. Returns the
+// user's choices with Sources unset (nil). Not unit-tested — the TUI is
+// exercised via manual smoke.
+func RunInitWizard() (Answers, error) {
 	var a Answers
 	form := huh.NewForm(
 		huh.NewGroup(
