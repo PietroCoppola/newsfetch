@@ -1,0 +1,42 @@
+name: Release
+
+# Triggered on every v* tag push. GoReleaser then cross-compiles, archives,
+# computes checksums, and publishes a GitHub Release. Pre-release tags
+# (e.g. v0.4.6-pre1) are auto-detected and marked as pre-release on the
+# Releases page, so they don't promote to the 'Latest release' marker.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  # contents: write is required for GoReleaser to create the GitHub Release
+  # and upload archives. No other scopes needed.
+  contents: write
+
+env:
+  # Same opt-in we set on the CI workflow — actions/checkout@v4 and
+  # actions/setup-go@v5 still target Node.js 20, which GitHub is
+  # deprecating. Drop this env var once those actions ship Node 24
+  # natively.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser needs full history to generate the changelog
+          # between this tag and the previous one.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
