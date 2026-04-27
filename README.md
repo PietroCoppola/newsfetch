@@ -1,11 +1,11 @@
 # newsfetch
 
 A small CLI that prints one piece of bite-sized tech news every time you open a
-terminal. Written in Go. Reads from Hacker News, with more sources planned;
-biased toward the topics you tell it you care about. The default render is a
-one-line boxed panel that takes a few hundred milliseconds and gets out of the
-way. No telemetry — outbound HTTP requests go only to your configured news
-sources, never anywhere else.
+terminal. Written in Go. Reads from Hacker News by default, with optional
+Lobste.rs and more sources planned; biased toward the topics you tell it you
+care about. The default render is a one-line boxed panel that takes a few
+hundred milliseconds and gets out of the way. No telemetry — outbound HTTP
+requests go only to your configured news sources, never anywhere else.
 
 ## Install
 
