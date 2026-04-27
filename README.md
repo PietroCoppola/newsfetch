@@ -4,7 +4,8 @@ A small CLI that prints one piece of bite-sized tech news every time you open a
 terminal. Written in Go. Reads from Hacker News, with more sources planned;
 biased toward the topics you tell it you care about. The default render is a
 one-line boxed panel that takes a few hundred milliseconds and gets out of the
-way.
+way. No telemetry — outbound HTTP requests go only to your configured news
+sources, never anywhere else.
 
 ## Install
 
@@ -109,6 +110,23 @@ Subcommands:
   --version
   --help
 ```
+
+## Notes
+
+- **Caching.** Story pool lives at `~/.cache/newsfetch/feed.json` (or
+  `$XDG_CACHE_HOME/newsfetch/feed.json`) with a 30-minute TTL. Reads newer
+  than the TTL render straight from cache; older reads render immediately
+  and spawn a background refresh (stale-while-revalidate). First run with
+  no cache hits the network synchronously.
+- **No telemetry, ever.** The binary makes outbound HTTP requests only to
+  the configured news sources. Nothing about you or your usage is
+  collected, transmitted, or logged anywhere outside your machine.
+- **Unix only.** macOS and Linux are supported; Windows isn't (the
+  background-refresh code uses a syscall that doesn't exist on Windows).
+  WSL works fine.
+- **Config** lives at `~/.config/newsfetch/config.toml` (or
+  `$XDG_CONFIG_HOME/newsfetch/config.toml`). **MIT licensed** — see
+  `LICENSE`.
 
 ## Status
 
