@@ -16,7 +16,7 @@
 #   6. Print the installed version.
 #
 # No telemetry, no curl flags that follow malicious redirects, no
-# implicit sudo. Reads the script before piping to sh is fine and
+# implicit sudo. Reading the script before piping to sh is fine and
 # encouraged.
 
 set -eu
