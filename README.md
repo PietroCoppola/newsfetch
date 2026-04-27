@@ -72,17 +72,26 @@ echo '{"topics": ["rust", "ai"], "style": "boxed"}' | newsfetch --init
 echo '{"topics": [], "style": "boxed", "sources": ["hackernews", "lobsters"]}' | newsfetch --init
 ```
 
-Style must be one of `boxed`, `minimal`, `json`. `topics` may be `[]`.
+Field rules:
+
+- `topics` — array of strings, may be `[]`. Empty means no topic bias; the
+  ranker scores stories by points and recency only.
+- `style` — one of `boxed`, `minimal`, `json`.
+- `sources` — array of strings drawn from the supported list (`hackernews`,
+  `lobsters`). When provided, must be non-empty.
 
 ### Scripted edit
 
 `--settings` is the equivalent of `--init` for changing your existing
 config. All three fields (`topics`, `style`, `sources`) are required when
-piping JSON; `sources` must be non-empty:
+piping JSON:
 
 ```
 echo '{"topics": ["rust"], "style": "minimal", "sources": ["hackernews"]}' | newsfetch --settings
 ```
+
+Same field rules as `--init`'s scripted install — `topics = []` means no
+topic bias, `sources` must be non-empty.
 
 ## Flags
 
