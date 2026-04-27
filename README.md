@@ -96,13 +96,18 @@ topic bias, `sources` must be non-empty.
 ## Flags
 
 ```
---style=<mode>    boxed (default) | minimal | json
---topics=<list>   comma-separated; explicit empty defeats config
---init            interactive setup
---settings        edit existing config (topics, style, sources)
---uninstall       remove the shell hook
---version
---help
+Per-render overrides (apply to this invocation only; config is
+untouched):
+  --style=<mode>    display mode for this render: boxed (default) | minimal | json
+  --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
+
+Subcommands:
+  --init            interactive setup
+  --settings        edit existing config (topics, style, sources)
+  --uninstall       remove the shell hook
+
+  --version
+  --help
 ```
 
 ## Status

@@ -327,9 +327,11 @@ func printHelp(out io.Writer) {
 
 Render one piece of tech news. Run without flags for the default boxed panel.
 
-Flags:
-  --style=<mode>    display mode: boxed (default) | minimal | json
-  --topics=<list>   comma-separated topics; explicit empty defeats config
+Per-render overrides (apply to this invocation only; config untouched):
+  --style=<mode>    display mode for this render: boxed (default) | minimal | json
+  --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
+
+Subcommands:
   --init            interactive setup: pick topics, style, patch shell rc
                     if stdin is not a TTY, reads JSON instead:
                       {"topics": ["rust"], "style": "boxed"}
@@ -339,6 +341,7 @@ Flags:
                       {"topics": ["rust"], "style": "boxed", "sources": ["hackernews"]}
                       all three fields required
   --uninstall       remove the newsfetch block from your shell rc
+
   --version         print version and exit
   --help            print usage and exit
 `)
