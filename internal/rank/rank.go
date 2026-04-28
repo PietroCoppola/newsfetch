@@ -43,28 +43,45 @@ func pickWeightedIndex(weights []float64, rng *rand.Rand) int {
 	return len(weights) - 1
 }
 
+// Tuning constants for the scoring formula. All three are starting values
+// open to revision once real-data dogfooding informs the call; see
+// spec.md §15. Named here rather than inlined in [Score] so the surface
+// of "what's tunable" is discoverable from the package, and so the call
+// site reads as design intent rather than a wall of magic numbers.
+const (
+	// gravityExponent controls how aggressively older stories decay. The
+	// 1.8 starting value follows HN's classic ranking algorithm.
+	gravityExponent = 1.8
+	// ageOffsetHours prevents fresh stories from getting near-infinite
+	// scores by keeping the denominator away from zero.
+	ageOffsetHours = 2.0
+	// topicMatchMultiplier is the boost applied when any configured topic
+	// matches the story's matching surface (title or tags).
+	topicMatchMultiplier = 2.0
+)
+
 // Score returns the ranking score for s given the user's topics and the
 // reference time now. Pure function; deterministic. Formula per spec §6:
 //
-//	score = (points / (age_hours + 2)^1.8) * topic_multiplier
+//	score = (points / (age_hours + ageOffsetHours)^gravityExponent) * topic_multiplier
 //
-// topic_multiplier is 2.0 when any configured topic matches the story's
-// matching surface (title plus tags), else 1.0. M4 widened "matches the
-// title" to "matches the title or any tag" so source-provided tags from
-// Lobste.rs (and future tagged sources) contribute to topic relevance
-// without per-source branches in the ranker. The 2.0x multiplier
-// therefore now fires on signals invisible to the user (tags), which is
-// intentional — the cleaner semantic is "topic matched any of the
-// story's relevance signals", and HN stories carry empty Tags so their
-// behaviour is unchanged.
+// topic_multiplier is [topicMatchMultiplier] when any configured topic
+// matches the story's matching surface (title plus tags), else 1.0. M4
+// widened "matches the title" to "matches the title or any tag" so
+// source-provided tags from Lobste.rs (and future tagged sources)
+// contribute to topic relevance without per-source branches in the
+// ranker. The boost therefore fires on signals invisible to the user
+// (tags), which is intentional — the cleaner semantic is "topic matched
+// any of the story's relevance signals", and HN stories carry empty
+// Tags so their behaviour is unchanged.
 func Score(s fetch.Story, topics []string, now time.Time) float64 {
 	ageHours := now.Sub(s.CreatedAt).Hours()
 	if ageHours < 0 {
 		ageHours = 0
 	}
-	base := float64(s.Points) / math.Pow(ageHours+2, 1.8)
+	base := float64(s.Points) / math.Pow(ageHours+ageOffsetHours, gravityExponent)
 	if matchesAnyTopic(s, topics) {
-		return base * 2.0
+		return base * topicMatchMultiplier
 	}
 	return base
 }
