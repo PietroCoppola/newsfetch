@@ -18,6 +18,9 @@ const (
 	boxTopRight = "╮"
 	boxBotLeft  = "╰"
 	boxBotRight = "╯"
+	boxLeftTee  = "├"
+	boxRightTee = "┤"
+	boxDownTee  = "┬"
 	ellipsis    = "…"
 	// minWidth is the floor for content legibility - narrower panels swap
 	// to the caller's problem; M1 never produces them.
