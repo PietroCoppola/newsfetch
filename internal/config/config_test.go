@@ -319,6 +319,46 @@ func TestValidate_SourcesAllValidNoWarning(t *testing.T) {
 	}
 }
 
+func TestValidate_CountTooLow(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Count = 0
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{Count: "config"}, &buf)
+	if got.Count != 1 {
+		t.Errorf("Count = %d, want 1 (clamped)", got.Count)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "count=0") || !strings.Contains(out, "from config") {
+		t.Errorf("warning missing details: %q", out)
+	}
+}
+
+func TestValidate_CountTooHigh(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Count = 99
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{Count: "flag"}, &buf)
+	if got.Count != 4 {
+		t.Errorf("Count = %d, want 4 (clamped)", got.Count)
+	}
+	if !strings.Contains(buf.String(), "from --count") {
+		t.Errorf("warning should name --count as source: %q", buf.String())
+	}
+}
+
+func TestValidate_UnknownTickerMarker(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TickerMarker = "spiral"
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if got.TickerMarker != "dot" {
+		t.Errorf("TickerMarker = %q, want dot (reset)", got.TickerMarker)
+	}
+	if !strings.Contains(buf.String(), "ticker_marker") || !strings.Contains(buf.String(), "spiral") {
+		t.Errorf("warning missing details: %q", buf.String())
+	}
+}
+
 func TestValidate_BudgetStyleWinsOverTTL(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Style = "wat"

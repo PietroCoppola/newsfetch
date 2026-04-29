@@ -29,17 +29,30 @@ type Config struct {
 	// and falls back to defaults if nothing valid remains. M4 default is
 	// ["hackernews"] — Lobste.rs is opt-in via config.
 	Sources []string
+	// Count is the number of stories rendered per invocation, 1..MaxCount.
+	// Values outside the range are clamped by Validate.
+	Count int
+	// TickerMarker is the symbol prefixing each non-hero entry in
+	// multi-story renders. Names match render.KnownTickerMarkers.
+	TickerMarker string
+	// TickerBoxed selects between one connected box (true) and a hero box
+	// with plain ticker lines beneath (false). Only takes effect when
+	// Style == "boxed" and Count > 1.
+	TickerBoxed bool
 }
 
 // Defaults returns the compile-time fallback config. Validate is a no-op on
 // this value by construction.
 func Defaults() Config {
 	return Config{
-		Topics:    nil,
-		Style:     defaults.Style,
-		CacheTTL:  defaults.CacheTTL,
-		MinPoints: defaults.MinPoints,
-		Sources:   append([]string(nil), defaults.Sources...),
+		Topics:       nil,
+		Style:        defaults.Style,
+		CacheTTL:     defaults.CacheTTL,
+		MinPoints:    defaults.MinPoints,
+		Sources:      append([]string(nil), defaults.Sources...),
+		Count:        defaults.Count,
+		TickerMarker: defaults.TickerMarker,
+		TickerBoxed:  defaults.TickerBoxed,
 	}
 }
 
@@ -82,6 +95,9 @@ func Load(path string) (Config, error) {
 		CacheTTLMinutes int      `toml:"cache_ttl_minutes"`
 		MinPoints       int      `toml:"min_points"`
 		Sources         []string `toml:"sources"`
+		Count           int      `toml:"count"`
+		TickerMarker    string   `toml:"ticker_marker"`
+		TickerBoxed     bool     `toml:"ticker_boxed"`
 	}
 	meta, err := toml.Decode(string(data), &raw)
 	if err != nil {
@@ -102,6 +118,15 @@ func Load(path string) (Config, error) {
 	}
 	if meta.IsDefined("sources") {
 		cfg.Sources = raw.Sources
+	}
+	if meta.IsDefined("count") {
+		cfg.Count = raw.Count
+	}
+	if meta.IsDefined("ticker_marker") {
+		cfg.TickerMarker = raw.TickerMarker
+	}
+	if meta.IsDefined("ticker_boxed") {
+		cfg.TickerBoxed = raw.TickerBoxed
 	}
 	return cfg, nil
 }

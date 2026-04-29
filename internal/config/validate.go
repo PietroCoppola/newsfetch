@@ -5,7 +5,9 @@ import (
 	"io"
 	"time"
 
+	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/render"
 )
 
 // FieldSources tells Validate where each validatable field came from so
@@ -14,6 +16,8 @@ import (
 type FieldSources struct {
 	// Style is "" (defaults), "config", or "flag".
 	Style string
+	// Count is "" (defaults), "config", or "flag".
+	Count string
 }
 
 // minCacheTTL is the validation floor for cache_ttl_minutes. It lives here
@@ -33,6 +37,8 @@ const minCacheTTL = 5 * time.Minute
 //  2. sources empty or all-unknown
 //  3. cache_ttl_minutes below minimum
 //  4. min_points below 0
+//  5. count out of [1, MaxCount]
+//  6. unknown ticker_marker
 //
 // Every early return must route through silentlyCorrect so fields below the
 // first warning still get clamped. If a new field is added to the cascade,
@@ -44,7 +50,7 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 	default:
 		bad := c.Style
 		c.Style = Defaults().Style
-		fmt.Fprintf(w, "newsfetch: unknown style %q (%s), using %q\n", bad, sourceLabel(src.Style), c.Style)
+		fmt.Fprintf(w, "newsfetch: unknown style %q (%s), using %q\n", bad, sourceLabel(src.Style, "style"), c.Style)
 		return silentlyCorrect(c)
 	}
 	valid, dropped := splitSources(c.Sources)
@@ -79,7 +85,40 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: min_points=%d below 0, using 0\n", bad)
 		return silentlyCorrect(c)
 	}
+	if c.Count < 1 || c.Count > defaults.MaxCount {
+		bad := c.Count
+		c.Count = clampCount(c.Count)
+		fmt.Fprintf(w, "newsfetch: count=%d out of [1, %d] (%s), using %d\n", bad, defaults.MaxCount, sourceLabel(src.Count, "count"), c.Count)
+		return silentlyCorrect(c)
+	}
+	if !knownTickerMarker(c.TickerMarker) {
+		bad := c.TickerMarker
+		c.TickerMarker = Defaults().TickerMarker
+		fmt.Fprintf(w, "newsfetch: unknown ticker_marker %q (from config), using %q\n", bad, c.TickerMarker)
+		return silentlyCorrect(c)
+	}
 	return c
+}
+
+// clampCount snaps Count into [1, MaxCount]. Used by the validator's
+// warning path and by silentlyCorrect.
+func clampCount(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > defaults.MaxCount {
+		return defaults.MaxCount
+	}
+	return n
+}
+
+func knownTickerMarker(name string) bool {
+	for _, m := range render.KnownTickerMarkers {
+		if string(m) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // silentlyCorrect applies the remaining clamps without emitting further
@@ -96,6 +135,10 @@ func silentlyCorrect(c Config) Config {
 		c.Sources = Defaults().Sources
 	} else {
 		c.Sources = valid
+	}
+	c.Count = clampCount(c.Count)
+	if !knownTickerMarker(c.TickerMarker) {
+		c.TickerMarker = Defaults().TickerMarker
 	}
 	return c
 }
@@ -122,10 +165,13 @@ func knownSource(name string) bool {
 	return false
 }
 
-func sourceLabel(src string) string {
+// sourceLabel renders the human-readable origin tag in a warning. flagName
+// is the long flag name without leading dashes (e.g. "style", "count");
+// callers pass the flag they would have used to set the offending field.
+func sourceLabel(src, flagName string) string {
 	switch src {
 	case "flag":
-		return "from --style"
+		return "from --" + flagName
 	case "config":
 		return "from config"
 	default:

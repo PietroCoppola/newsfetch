@@ -46,6 +46,24 @@ const (
 
 	// Style is the default render mode when no config or flag overrides it.
 	Style = "boxed"
+
+	// Count is the default number of stories rendered per invocation.
+	// Bounded by MaxCount; values above are rejected as a friendly error.
+	Count = 1
+
+	// MaxCount caps multi-story renders. Hero+ticker stops feeling
+	// intentional beyond this and turns into a list, which isn't what the
+	// format is for.
+	MaxCount = 4
+
+	// TickerMarker is the default symbol for ticker entries when more than
+	// one story renders. Names mirror render.TickerMarker.
+	TickerMarker = "dot"
+
+	// TickerBoxed controls whether multi-story renders draw a single
+	// outer box around hero plus tickers (true) or render the hero in its
+	// own box with ticker lines beneath (false).
+	TickerBoxed = false
 )
 
 // Sources is the default source list. M4 ships HN-only by default and
