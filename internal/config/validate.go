@@ -39,6 +39,7 @@ const minCacheTTL = 5 * time.Minute
 //  4. min_points below 0
 //  5. count out of [1, MaxCount]
 //  6. unknown ticker_marker
+//  7. dedup_ttl_hours negative
 //
 // Every early return must route through silentlyCorrect so fields below the
 // first warning still get clamped. If a new field is added to the cascade,
@@ -97,6 +98,12 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: unknown ticker_marker %q (from config), using %q\n", bad, c.TickerMarker)
 		return silentlyCorrect(c)
 	}
+	if c.DedupWindow < 0 {
+		bad := int(c.DedupWindow / time.Hour)
+		c.DedupWindow = 0
+		fmt.Fprintf(w, "newsfetch: dedup_ttl_hours=%d negative, treating as 0 (history dedup disabled)\n", bad)
+		return silentlyCorrect(c)
+	}
 	return c
 }
 
@@ -139,6 +146,9 @@ func silentlyCorrect(c Config) Config {
 	c.Count = clampCount(c.Count)
 	if !knownTickerMarker(c.TickerMarker) {
 		c.TickerMarker = Defaults().TickerMarker
+	}
+	if c.DedupWindow < 0 {
+		c.DedupWindow = 0
 	}
 	return c
 }

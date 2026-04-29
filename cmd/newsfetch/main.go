@@ -223,7 +223,7 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		return err
 	}
 	now := time.Now().UTC()
-	seen := loadSeen(errOut)
+	seen := loadSeen(cfg, now, errOut)
 	f, readErr := cache.Read(path)
 	if readErr == nil && len(f.Stories) > 0 {
 		picked := selectFromPool(f.Stories, seen, cfg, now, rng)
@@ -262,11 +262,19 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	return nil
 }
 
-// loadSeen returns the user's render history as a hash set for pre-filter.
+// loadSeen returns the user's render history as a hash set for pre-filter,
+// time-gated to entries within cfg.DedupWindow of now. Older entries age
+// out of the dedup pool and become eligible for re-rendering. A
+// DedupWindow of zero disables the time gate entirely (no dedup, every
+// cached story is always eligible).
+//
 // A read error (corrupt file, unreadable) is logged to errOut and treated
 // as empty history — failing to dedup is strictly better than failing to
 // render. A missing file is the normal first-run case and produces no log.
-func loadSeen(errOut io.Writer) map[string]struct{} {
+func loadSeen(cfg config.Config, now time.Time, errOut io.Writer) map[string]struct{} {
+	if cfg.DedupWindow <= 0 {
+		return map[string]struct{}{}
+	}
 	path, err := history.Path()
 	if err != nil {
 		fmt.Fprintln(errOut, "newsfetch: warning: history path:", err)
@@ -277,7 +285,7 @@ func loadSeen(errOut io.Writer) map[string]struct{} {
 		fmt.Fprintln(errOut, "newsfetch: warning: history read:", err)
 		return map[string]struct{}{}
 	}
-	return f.HashSet()
+	return f.RecentHashSet(now, cfg.DedupWindow)
 }
 
 // selectFromPool pre-filters pool against seen, then picks cfg.Count
@@ -510,10 +518,10 @@ func writeCache(path string, stories []fetch.Story, at time.Time) error {
 // Per-style multi-story behaviour:
 //
 //   - boxed:   render.Multi handles single-story (delegates to Boxed) and
-//              multi-story (hero + ticker) uniformly.
+//     multi-story (hero + ticker) uniformly.
 //   - minimal: N stacked minimal lines (literal repetition, no decoration).
 //   - json:    one JSON object when len==1, a JSON array when len>1, so
-//              existing single-story scripted consumers stay unbroken.
+//     existing single-story scripted consumers stay unbroken.
 func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now time.Time) {
 	if len(stories) == 0 {
 		return

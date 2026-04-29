@@ -359,6 +359,20 @@ func TestValidate_UnknownTickerMarker(t *testing.T) {
 	}
 }
 
+func TestValidate_NegativeDedupWindow(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.DedupWindow = -1 * time.Hour
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if got.DedupWindow != 0 {
+		t.Errorf("DedupWindow = %v, want 0 (clamped)", got.DedupWindow)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "dedup_ttl_hours") || !strings.Contains(out, "disabled") {
+		t.Errorf("warning should explain dedup disabled; got %q", out)
+	}
+}
+
 func TestValidate_BudgetStyleWinsOverTTL(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Style = "wat"

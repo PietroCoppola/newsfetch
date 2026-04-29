@@ -39,6 +39,12 @@ type Config struct {
 	// with plain ticker lines beneath (false). Only takes effect when
 	// Style == "boxed" and Count > 1.
 	TickerBoxed bool
+	// DedupWindow is the dedup window. A story rendered within the
+	// last DedupWindow is filtered out of the candidate pool, then
+	// ages back in. Zero means dedup is disabled entirely (every story
+	// in the cache is always eligible). Validate clamps negative values
+	// to zero with a warning.
+	DedupWindow time.Duration
 }
 
 // Defaults returns the compile-time fallback config. Validate is a no-op on
@@ -53,6 +59,7 @@ func Defaults() Config {
 		Count:        defaults.Count,
 		TickerMarker: defaults.TickerMarker,
 		TickerBoxed:  defaults.TickerBoxed,
+		DedupWindow:  defaults.DedupWindow,
 	}
 }
 
@@ -98,6 +105,7 @@ func Load(path string) (Config, error) {
 		Count           int      `toml:"count"`
 		TickerMarker    string   `toml:"ticker_marker"`
 		TickerBoxed     bool     `toml:"ticker_boxed"`
+		DedupTTLHours   int      `toml:"dedup_ttl_hours"`
 	}
 	meta, err := toml.Decode(string(data), &raw)
 	if err != nil {
@@ -127,6 +135,9 @@ func Load(path string) (Config, error) {
 	}
 	if meta.IsDefined("ticker_boxed") {
 		cfg.TickerBoxed = raw.TickerBoxed
+	}
+	if meta.IsDefined("dedup_ttl_hours") {
+		cfg.DedupWindow = time.Duration(raw.DedupTTLHours) * time.Hour
 	}
 	return cfg, nil
 }

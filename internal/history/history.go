@@ -145,10 +145,32 @@ func Append(path string, entries []Entry) error {
 }
 
 // HashSet returns the entry hashes as a set for O(1) pre-filter lookups.
+// Includes every entry regardless of age. For time-gated dedup, prefer
+// [File.RecentHashSet].
 func (f *File) HashSet() map[string]struct{} {
 	out := make(map[string]struct{}, len(f.Entries))
 	for _, e := range f.Entries {
 		out[e.Hash] = struct{}{}
+	}
+	return out
+}
+
+// RecentHashSet returns the hashes of entries rendered within window of
+// now. Older entries age out of the dedup pool and become eligible for
+// re-rendering. A non-positive window returns an empty set — callers
+// wanting "no time gate" should treat that as "history dedup disabled"
+// rather than asking for a window of zero, which would gate everything
+// out.
+func (f *File) RecentHashSet(now time.Time, window time.Duration) map[string]struct{} {
+	if window <= 0 {
+		return map[string]struct{}{}
+	}
+	cutoff := now.Add(-window)
+	out := make(map[string]struct{}, len(f.Entries))
+	for _, e := range f.Entries {
+		if e.RenderedAt.After(cutoff) {
+			out[e.Hash] = struct{}{}
+		}
 	}
 	return out
 }

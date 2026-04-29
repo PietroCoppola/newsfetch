@@ -80,6 +80,15 @@ const (
 	// FetchTimeout bounds one upstream request so a hung network can't
 	// keep the background refresh alive forever.
 	FetchTimeout = 5 * time.Second
+
+	// DedupWindow is the default dedup window: a story rendered within
+	// the last DedupWindow is filtered out of the candidate pool, after
+	// which it ages back in. The default sits between the cache TTL
+	// (30 min — too short, a story would re-appear in the next refresh)
+	// and a day (too long — yesterday's top item shouldn't still be
+	// blocked). Configurable via dedup_ttl_hours; zero disables the
+	// time gate entirely so every cached story is always eligible.
+	DedupWindow = 6 * time.Hour
 )
 
 // TermWidth reports a render width for the boxed style. It consults the

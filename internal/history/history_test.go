@@ -130,6 +130,52 @@ func TestHashSet(t *testing.T) {
 	}
 }
 
+func TestRecentHashSet(t *testing.T) {
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	entries := []history.Entry{
+		{Hash: "very-old", RenderedAt: now.Add(-24 * time.Hour)},
+		{Hash: "edge-stale", RenderedAt: now.Add(-6 * time.Hour)}, // exactly at cutoff
+		{Hash: "recent", RenderedAt: now.Add(-3 * time.Hour)},
+		{Hash: "fresh", RenderedAt: now.Add(-1 * time.Minute)},
+	}
+	f := &history.File{Entries: entries}
+
+	cases := []struct {
+		name   string
+		window time.Duration
+		want   []string
+	}{
+		{"zero window returns empty", 0, nil},
+		{"negative window returns empty", -1 * time.Hour, nil},
+		{"6h window excludes the entry exactly at cutoff", 6 * time.Hour, []string{"recent", "fresh"}},
+		{"4h window includes only fresh and recent", 4 * time.Hour, []string{"recent", "fresh"}},
+		{"30d window includes everything", 30 * 24 * time.Hour, []string{"very-old", "edge-stale", "recent", "fresh"}},
+		{"30s window includes only fresh", 30 * time.Second, nil}, // fresh is 1 minute old
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := f.RecentHashSet(now, tc.window)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len = %d, want %d (got %v, want %v)", len(got), len(tc.want), keys(got), tc.want)
+			}
+			for _, h := range tc.want {
+				if _, ok := got[h]; !ok {
+					t.Errorf("missing hash %q in result %v", h, keys(got))
+				}
+			}
+		})
+	}
+}
+
+func keys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func TestPath(t *testing.T) {
 	cases := []struct {
 		name     string
