@@ -11,12 +11,51 @@ func TestReadInitJSON_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadInitJSON: %v", err)
 	}
-	want := Answers{Topics: []string{"rust", "ai"}, Style: "boxed"}
+	// Omitted optional fields fall back to compile-time defaults; sources
+	// stays nil so the writer omits it.
+	want := Answers{
+		Topics:       []string{"rust", "ai"},
+		Style:        "boxed",
+		Count:        1,
+		TickerMarker: "dot",
+		TickerBoxed:  false,
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 	if got.Sources != nil {
 		t.Errorf("Sources should be nil when omitted; got %v", got.Sources)
+	}
+}
+
+func TestReadInitJSON_FullPowerUser(t *testing.T) {
+	body := `{"topics":[],"style":"boxed","sources":["hackernews"],"count":3,"ticker_marker":"branch","ticker_boxed":true}`
+	got, err := ReadInitJSON(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("ReadInitJSON: %v", err)
+	}
+	if got.Count != 3 || got.TickerMarker != "branch" || !got.TickerBoxed {
+		t.Errorf("multi-story fields not parsed: %+v", got)
+	}
+}
+
+func TestReadInitJSON_CountOutOfRange(t *testing.T) {
+	cases := []string{
+		`{"topics":[],"style":"boxed","count":0}`,
+		`{"topics":[],"style":"boxed","count":99}`,
+	}
+	for _, body := range cases {
+		_, err := ReadInitJSON(strings.NewReader(body))
+		if err == nil {
+			t.Errorf("expected error for body %q", body)
+		}
+	}
+}
+
+func TestReadInitJSON_UnknownTickerMarker(t *testing.T) {
+	_, err := ReadInitJSON(strings.NewReader(`{"topics":[],"style":"boxed","ticker_marker":"spiral"}`))
+	if err == nil {
+		t.Fatal("expected error for unknown ticker_marker")
 	}
 }
 

@@ -134,9 +134,12 @@ func runSettings(out io.Writer) error {
 				return onboard.Answers{}, err
 			}
 			return onboard.Answers{
-				Topics:  cfg.Topics,
-				Style:   cfg.Style,
-				Sources: cfg.Sources,
+				Topics:       cfg.Topics,
+				Style:        cfg.Style,
+				Sources:      cfg.Sources,
+				Count:        cfg.Count,
+				TickerMarker: cfg.TickerMarker,
+				TickerBoxed:  cfg.TickerBoxed,
 			}, nil
 		},
 		Answers: pickSettingsAnswerSource(os.Stdin),
@@ -146,14 +149,17 @@ func runSettings(out io.Writer) error {
 
 // pickSettingsAnswerSource returns the function SettingsFlow will call to
 // collect updated answers. TTY → interactive wizard pre-filled with the
-// caller-provided current values; non-TTY → JSON parsed from in (current is
-// ignored; the JSON shape is authoritative). Symmetric with --init's
-// pickAnswerSource.
+// caller-provided current values; non-TTY → JSON parsed from in, with the
+// caller-provided current values used as fallback for fields the wizard
+// would have hidden (ticker_marker, ticker_boxed) so omitted fields don't
+// silently revert to defaults. Symmetric with --init's pickAnswerSource.
 func pickSettingsAnswerSource(in *os.File) func(onboard.Answers) (onboard.Answers, error) {
 	if term.IsTerminal(int(in.Fd())) {
 		return onboard.RunSettingsWizard
 	}
-	return func(_ onboard.Answers) (onboard.Answers, error) { return onboard.ReadSettingsJSON(in) }
+	return func(current onboard.Answers) (onboard.Answers, error) {
+		return onboard.ReadSettingsJSON(in, current)
+	}
 }
 
 // runUninstall removes the shell rc block and offers (interactively, when

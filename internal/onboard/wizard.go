@@ -32,6 +32,31 @@ var styleOptions = []huh.Option[string]{
 	huh.NewOption("JSON (machine-readable)", "json"),
 }
 
+// countOptions defines the per-render story-count picker, surfaced in the
+// settings wizard. Capped at defaults.MaxCount; values above turn hero+ticker
+// into a list, which the spec deliberately rejects.
+var countOptions = []huh.Option[int]{
+	huh.NewOption("1 (single story)", 1),
+	huh.NewOption("2", 2),
+	huh.NewOption("3", 3),
+	huh.NewOption("4", 4),
+}
+
+// tickerMarkerOptions defines the ticker-marker picker. Names mirror
+// render.KnownTickerMarkers; the labels carry a one-glyph preview so the
+// user can tell them apart without remembering what each name draws.
+var tickerMarkerOptions = []huh.Option[string]{
+	huh.NewOption("Dot · (default, neutral)", "dot"),
+	huh.NewOption("Arrow ↳ (continuation)", "arrow"),
+	huh.NewOption("Branch ├─ (tree)", "branch"),
+}
+
+// tickerBoxedOptions defines the box-style picker for multi-story renders.
+var tickerBoxedOptions = []huh.Option[bool]{
+	huh.NewOption("Plain (hero box, ticker lines beneath)", false),
+	huh.NewOption("Connected (one outer box around hero plus ticker)", true),
+}
+
 // sourceOptions builds the source multi-select choices from the canonical
 // list in fetch.KnownSourceNames so a new source automatically shows up
 // in the --settings wizard without a second edit.
@@ -51,13 +76,25 @@ func sourceOptions() []huh.Option[string] {
 }
 
 // Answers captures wizard / JSON-stdin output for both --init and --settings.
+//
 // Sources is nil-vs-non-nil sensitive: nil means "the caller did not specify
 // sources" (config writers omit the field so future default changes flow
 // through), non-nil means "use exactly these" (config writers emit the line).
+//
+// Count, TickerMarker, and TickerBoxed are persisted unconditionally even
+// when currently inert (e.g. TickerMarker survives a switch from
+// style=boxed to style=minimal). The choice is deliberate: a user who
+// previously tuned the multi-story render expects to find that tuning
+// preserved when they switch back, rather than having to re-pick from
+// defaults. The settings wizard mirrors this by hiding the ticker fields
+// when inert rather than clearing them.
 type Answers struct {
-	Topics  []string
-	Style   string
-	Sources []string // nil → omit from config; non-nil → emit verbatim
+	Topics       []string
+	Style        string
+	Sources      []string // nil → omit from config; non-nil → emit verbatim
+	Count        int
+	TickerMarker string
+	TickerBoxed  bool
 }
 
 // RunInitWizard drives the interactive --init UI: a topic multi-select
@@ -99,14 +136,17 @@ func RunInitWizard() (Answers, error) {
 // (sources is required and validated). Not unit-tested — manual smoke.
 func RunSettingsWizard(current Answers) (Answers, error) {
 	a := Answers{
-		Topics:  append([]string(nil), current.Topics...),
-		Style:   current.Style,
-		Sources: append([]string(nil), current.Sources...),
+		Topics:       append([]string(nil), current.Topics...),
+		Style:        current.Style,
+		Sources:      append([]string(nil), current.Sources...),
+		Count:        current.Count,
+		TickerMarker: current.TickerMarker,
+		TickerBoxed:  current.TickerBoxed,
 	}
 	form := huh.NewForm(
+		// Group 1: always shown. Content config first (topics + sources):
+		// what news, from where. Presentation config (style + count) last.
 		huh.NewGroup(
-			// Content config first (topics + sources): what news, from where.
-			// Presentation config last (style): how it renders.
 			huh.NewMultiSelect[string]().
 				Title("Topics").
 				Description("These bias which stories surface. Leave empty to see whatever's hot.").
@@ -130,7 +170,33 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 				Filtering(false).
 				Options(styleOptions...).
 				Value(&a.Style),
+			huh.NewSelect[int]().
+				Title("Stories per render").
+				Description("How many stories appear each invocation.").
+				Filtering(false).
+				Options(countOptions...).
+				Value(&a.Count),
 		),
+		// Group 2: only relevant when more than one story renders inside a
+		// boxed hero. Hidden otherwise so the wizard stays tight in the
+		// common case (single-story or non-boxed style). Hidden values are
+		// preserved, not cleared — a user who switches away and back finds
+		// their prior tuning intact.
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Ticker marker").
+				Description("Symbol prefixing each non-hero story.").
+				Filtering(false).
+				Options(tickerMarkerOptions...).
+				Value(&a.TickerMarker),
+			huh.NewSelect[bool]().
+				Title("Ticker box style").
+				Filtering(false).
+				Options(tickerBoxedOptions...).
+				Value(&a.TickerBoxed),
+		).WithHideFunc(func() bool {
+			return a.Style != "boxed" || a.Count <= 1
+		}),
 	).WithKeyMap(settingsKeyMap())
 	if err := form.Run(); err != nil {
 		return Answers{}, err

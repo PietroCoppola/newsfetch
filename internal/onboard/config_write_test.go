@@ -126,6 +126,61 @@ func TestOverwriteConfig_ReplacesExisting(t *testing.T) {
 	}
 }
 
+func TestWriteConfig_CountAndTickerRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	answers := Answers{
+		Topics:       nil,
+		Style:        "boxed",
+		Sources:      []string{"hackernews"},
+		Count:        3,
+		TickerMarker: "branch",
+		TickerBoxed:  true,
+	}
+	if err := WriteConfig(path, answers); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Count != 3 {
+		t.Errorf("Count = %d, want 3", cfg.Count)
+	}
+	if cfg.TickerMarker != "branch" {
+		t.Errorf("TickerMarker = %q, want branch", cfg.TickerMarker)
+	}
+	if !cfg.TickerBoxed {
+		t.Errorf("TickerBoxed = %v, want true", cfg.TickerBoxed)
+	}
+}
+
+func TestWriteConfig_TickerFieldsEmittedEvenWhenInert(t *testing.T) {
+	// User has style=minimal (ticker fields are inert) but their TickerMarker
+	// is set to "branch" from a prior config. The writer must persist it so a
+	// future switch back to style=boxed restores the prior tuning instead of
+	// silently reverting to the default.
+	path := filepath.Join(t.TempDir(), "config.toml")
+	answers := Answers{
+		Topics:       nil,
+		Style:        "minimal",
+		Sources:      []string{"hackernews"},
+		Count:        1,
+		TickerMarker: "branch",
+		TickerBoxed:  true,
+	}
+	if err := WriteConfig(path, answers); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	body := string(data)
+	if !strings.Contains(body, "ticker_marker") || !strings.Contains(body, "branch") {
+		t.Errorf("ticker_marker not persisted; got:\n%s", body)
+	}
+	if !strings.Contains(body, "ticker_boxed = true") {
+		t.Errorf("ticker_boxed not persisted; got:\n%s", body)
+	}
+}
+
 func TestOverwriteConfig_CreatesWhenMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "newsubdir", "config.toml")
 	if err := OverwriteConfig(path, Answers{Topics: nil, Style: "boxed", Sources: []string{"hackernews"}}); err != nil {

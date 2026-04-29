@@ -55,6 +55,11 @@ func writeConfigBytes(path string, answers Answers) error {
 
 // renderConfigTOML produces the TOML body. Kept separate from WriteConfig
 // for easy golden-style testing if that ever becomes useful.
+//
+// count, ticker_marker, and ticker_boxed are emitted unconditionally (even
+// when currently inert because style != "boxed" or count == 1) so a user's
+// prior multi-story tuning survives a temporary switch away. This mirrors
+// the wizard's hide-don't-clear behaviour for the same fields.
 func renderConfigTOML(a Answers) string {
 	var b strings.Builder
 	b.WriteString("# newsfetch config. Edit freely; see spec.md for field meanings.\n\n")
@@ -63,6 +68,9 @@ func renderConfigTOML(a Answers) string {
 	if a.Sources != nil {
 		b.WriteString(renderStringArray("sources", a.Sources))
 	}
+	fmt.Fprintf(&b, "count = %d\n", a.Count)
+	fmt.Fprintf(&b, "ticker_marker = %q\n", a.TickerMarker)
+	fmt.Fprintf(&b, "ticker_boxed = %t\n", a.TickerBoxed)
 	return b.String()
 }
 
