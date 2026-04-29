@@ -9,9 +9,6 @@ requests go only to your configured news sources, never anywhere else.
 
 ## Install
 
-Use whichever path matches what you already have installed. They land
-the same binary; the differences are only in how it gets there.
-
 ### Easy install (macOS, Linux) — no Go required
 
 ```
@@ -88,12 +85,11 @@ Subcommands:
 - **No telemetry, ever.** The binary makes outbound HTTP requests only to
   the configured news sources. Nothing about you or your usage is
   collected, transmitted, or logged anywhere outside your machine.
-- **Unix only.** macOS and Linux are supported; Windows isn't (the
-  background-refresh code uses a syscall that doesn't exist on Windows).
-  WSL works fine.
+- **Unix only.** macOS and Linux are supported; native Windows isn't
+  planned but isn't ruled out. WSL works fine in the meantime.
 - **Config** lives at `~/.config/newsfetch/config.toml` (or
-  `$XDG_CONFIG_HOME/newsfetch/config.toml`). **MIT licensed** — see
-  `LICENSE`.
+  `$XDG_CONFIG_HOME/newsfetch/config.toml`).
+- **MIT licensed** — see `LICENSE`.
 
 ## Power user
 
@@ -128,8 +124,7 @@ echo '{"topics": ["rust"], "style": "boxed", "count": 3, "ticker_marker": "branc
 ```
 
 Field validation matches the [config reference](#config-reference).
-Unknown JSON fields are rejected (better fail loud than silently lose a
-typo'd key).
+Unknown JSON fields are rejected.
 
 ### Scripted edit (--settings via JSON)
 
