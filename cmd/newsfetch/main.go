@@ -22,6 +22,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/history"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/rank"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
@@ -222,14 +223,12 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		return err
 	}
 	now := time.Now().UTC()
+	seen := loadSeen(errOut)
 	f, readErr := cache.Read(path)
 	if readErr == nil && len(f.Stories) > 0 {
-		story := rank.Select(f.Stories, rank.Options{
-			Topics:   cfg.Topics,
-			Now:      now,
-			PoolSize: defaults.RankPoolSize,
-		}, rng)
-		writeStory(out, story, cfg.Style, now)
+		picked := selectFromPool(f.Stories, seen, cfg, now, rng)
+		writeStories(out, picked, cfg, now)
+		recordHistory(picked, now, errOut)
 		if !f.IsFresh(cfg.CacheTTL, now) {
 			spawnRefresh()
 		}
@@ -249,12 +248,9 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg.Sources)))
 		return nil
 	}
-	story := rank.Select(stories, rank.Options{
-		Topics:   cfg.Topics,
-		Now:      now,
-		PoolSize: defaults.RankPoolSize,
-	}, rng)
-	writeStory(out, story, cfg.Style, now)
+	picked := selectFromPool(stories, seen, cfg, now, rng)
+	writeStories(out, picked, cfg, now)
+	recordHistory(picked, now, errOut)
 	// Full-replace on partial fetch: a failed source's prior stories drop
 	// out of the cache rather than ghosting indefinitely. Self-healing on
 	// the next fully-successful refresh. Time-bounded merge (per-story TTL
@@ -264,6 +260,70 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		fmt.Fprintln(errOut, "newsfetch: warning: could not write cache:", writeErr)
 	}
 	return nil
+}
+
+// loadSeen returns the user's render history as a hash set for pre-filter.
+// A read error (corrupt file, unreadable) is logged to errOut and treated
+// as empty history — failing to dedup is strictly better than failing to
+// render. A missing file is the normal first-run case and produces no log.
+func loadSeen(errOut io.Writer) map[string]struct{} {
+	path, err := history.Path()
+	if err != nil {
+		fmt.Fprintln(errOut, "newsfetch: warning: history path:", err)
+		return map[string]struct{}{}
+	}
+	f, err := history.Read(path)
+	if err != nil {
+		fmt.Fprintln(errOut, "newsfetch: warning: history read:", err)
+		return map[string]struct{}{}
+	}
+	return f.HashSet()
+}
+
+// selectFromPool pre-filters pool against seen, then picks cfg.Count
+// stories with diversity-aware multi-selection. If every story in the
+// pool has been seen, the filter is bypassed so the user gets a render
+// rather than the offline fallback — eventual repeats beat eventual
+// silence.
+func selectFromPool(pool []fetch.Story, seen map[string]struct{}, cfg config.Config, now time.Time, rng *rand.Rand) []fetch.Story {
+	candidates := rank.Filter(pool, seen)
+	if len(candidates) == 0 {
+		candidates = pool
+	}
+	return rank.SelectN(candidates, cfg.Count, rank.Options{
+		Topics:   cfg.Topics,
+		Now:      now,
+		PoolSize: defaults.RankPoolSize,
+	}, rng)
+}
+
+// recordHistory appends the rendered stories to seen.json in render order
+// (hero first, then ticker entries). Write failures are logged but do not
+// fail the render — losing one entry to a transient write error matters
+// less than the user's terminal opening cleanly.
+func recordHistory(rendered []fetch.Story, now time.Time, errOut io.Writer) {
+	if len(rendered) == 0 {
+		return
+	}
+	path, err := history.Path()
+	if err != nil {
+		fmt.Fprintln(errOut, "newsfetch: warning: history path:", err)
+		return
+	}
+	entries := make([]history.Entry, len(rendered))
+	for i, s := range rendered {
+		entries[i] = history.Entry{
+			Hash:       s.Hash(),
+			Title:      s.Title,
+			URL:        s.URL,
+			Source:     s.Source,
+			Tags:       s.Tags,
+			RenderedAt: now,
+		}
+	}
+	if err := history.Append(path, entries); err != nil {
+		fmt.Fprintln(errOut, "newsfetch: warning: history append:", err)
+	}
 }
 
 type earlyExitKind int
@@ -287,6 +347,11 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 	styleFlag := fs.String("style", "", "display mode: boxed | minimal | json")
 	topics := &topicsFlag{}
 	fs.Var(topics, "topics", "comma-separated topic list (explicit empty defeats config)")
+	// countFlag is sentinel-zero so we can distinguish "user didn't pass
+	// --count" (keep cfg.Count from config) from "user passed --count=0"
+	// (clamped + warned by the validator). flag.IntVar with default -1
+	// gives the same effect with a real integer.
+	countFlag := fs.Int("count", -1, "stories to render this invocation: 1..4 (overrides config)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	showHelp := fs.Bool("help", false, "print usage and exit")
 	if err := fs.Parse(args); err != nil {
@@ -324,6 +389,13 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 	if topics.set {
 		cfg.Topics = topics.vals
 	}
+	if cfg.Count != config.Defaults().Count {
+		src.Count = "config"
+	}
+	if *countFlag != -1 {
+		cfg.Count = *countFlag
+		src.Count = "flag"
+	}
 	cfg = config.Validate(cfg, src, errOut)
 	return cfg, exitRun, nil
 }
@@ -336,16 +408,18 @@ Render one piece of tech news. Run without flags for the default boxed panel.
 Per-render overrides (apply to this invocation only; config untouched):
   --style=<mode>    display mode for this render: boxed (default) | minimal | json
   --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
+  --count=<n>       number of stories this render: 1..4 (default 1)
 
 Subcommands:
   --init            interactive setup: pick topics, style, patch shell rc
                     if stdin is not a TTY, reads JSON instead:
                       {"topics": ["rust"], "style": "boxed"}
-                      sources is optional in --init JSON
-  --settings        edit existing config: topics, style, sources
+                      sources, count, ticker_marker, ticker_boxed are optional
+  --settings        edit existing config: topics, style, sources, count, ticker
                     if stdin is not a TTY, reads JSON instead:
-                      {"topics": ["rust"], "style": "boxed", "sources": ["hackernews"]}
-                      all three fields required
+                      {"topics": ["rust"], "style": "boxed",
+                       "sources": ["hackernews"], "count": 1}
+                      first four required; ticker_marker, ticker_boxed optional
   --uninstall       remove the newsfetch block from your shell rc
 
   --version         print version and exit
@@ -429,17 +503,37 @@ func writeCache(path string, stories []fetch.Story, at time.Time) error {
 	})
 }
 
-// writeStory dispatches to the renderer named by style. The caller has
-// already validated style to one of the three known values; any other
-// value falls back to boxed (belt-and-suspenders).
-func writeStory(out io.Writer, s fetch.Story, style string, now time.Time) {
-	switch style {
+// writeStories dispatches to the renderer named by cfg.Style for one or
+// more stories. The caller has already validated cfg fields; any unknown
+// style falls back to boxed (belt-and-suspenders).
+//
+// Per-style multi-story behaviour:
+//
+//   - boxed:   render.Multi handles single-story (delegates to Boxed) and
+//              multi-story (hero + ticker) uniformly.
+//   - minimal: N stacked minimal lines (literal repetition, no decoration).
+//   - json:    one JSON object when len==1, a JSON array when len>1, so
+//              existing single-story scripted consumers stay unbroken.
+func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now time.Time) {
+	if len(stories) == 0 {
+		return
+	}
+	switch cfg.Style {
 	case "minimal":
-		fmt.Fprint(out, render.Minimal(s, now))
+		for _, s := range stories {
+			fmt.Fprint(out, render.Minimal(s, now))
+		}
 	case "json":
-		fmt.Fprint(out, render.JSON(s, now))
+		if len(stories) == 1 {
+			fmt.Fprint(out, render.JSON(stories[0], now))
+			return
+		}
+		fmt.Fprint(out, render.JSONMulti(stories, now))
 	default:
-		fmt.Fprint(out, render.Boxed(s, now, defaults.TermWidth(defaults.BoxWidth)))
+		fmt.Fprint(out, render.Multi(stories, now, defaults.TermWidth(defaults.BoxWidth), render.MultiOptions{
+			Marker: render.TickerMarker(cfg.TickerMarker),
+			Boxed:  cfg.TickerBoxed,
+		}))
 	}
 }
 
