@@ -58,41 +58,8 @@ Walks you through picking topics and a display style, writes the config to
 `~/.config/newsfetch/config.toml`, and patches your shell's rc file (zsh,
 bash, or fish) so a story renders on each new terminal.
 
-To remove the shell hook later: `newsfetch --uninstall`.
-
-To edit your config later (topics, style, sources): `newsfetch --settings`.
-
-### Scripted install
-
-`--init` skips the interactive wizard when stdin is not a TTY and reads JSON
-instead. `topics` and `style` are required; `sources` is optional (omit it
-to inherit the default):
-
-```
-echo '{"topics": ["rust", "ai"], "style": "boxed"}' | newsfetch --init
-echo '{"topics": [], "style": "boxed", "sources": ["hackernews", "lobsters"]}' | newsfetch --init
-```
-
-Field rules:
-
-- `topics` — array of strings, may be `[]`. Empty means no topic bias; the
-  ranker scores stories by points and recency only.
-- `style` — one of `boxed`, `minimal`, `json`.
-- `sources` — array of strings drawn from the supported list (`hackernews`,
-  `lobsters`). When provided, must be non-empty.
-
-### Scripted edit
-
-`--settings` is the equivalent of `--init` for changing your existing
-config. All three fields (`topics`, `style`, `sources`) are required when
-piping JSON:
-
-```
-echo '{"topics": ["rust"], "style": "minimal", "sources": ["hackernews"]}' | newsfetch --settings
-```
-
-Same field rules as `--init`'s scripted install — `topics = []` means no
-topic bias, `sources` must be non-empty.
+- `newsfetch --settings` — edit your config later (topics, style, sources, count, ticker).
+- `newsfetch --uninstall` — remove the shell hook.
 
 ## Flags
 
@@ -101,10 +68,11 @@ Per-render overrides (apply to this invocation only; config is
 untouched):
   --style=<mode>    display mode for this render: boxed (default) | minimal | json
   --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
+  --count=<n>       number of stories this render: 1..4 (default 1)
 
 Subcommands:
   --init            interactive setup
-  --settings        edit existing config (topics, style, sources)
+  --settings        edit existing config (topics, style, sources, count, ticker)
   --uninstall       remove the shell hook
 
   --version
@@ -113,11 +81,10 @@ Subcommands:
 
 ## Notes
 
-- **Caching.** Story pool lives at `~/.cache/newsfetch/feed.json` (or
-  `$XDG_CACHE_HOME/newsfetch/feed.json`) with a 30-minute TTL. Reads newer
-  than the TTL render straight from cache; older reads render immediately
-  and spawn a background refresh (stale-while-revalidate). First run with
-  no cache hits the network synchronously.
+- **Local cache and dedup.** Repeat terminal opens render from a local
+  cache; rendered stories are tracked so the same headline doesn't keep
+  cycling. Both windows are tunable — see `cache_ttl_minutes` and
+  `dedup_ttl_hours` in the [config reference](#config-reference).
 - **No telemetry, ever.** The binary makes outbound HTTP requests only to
   the configured news sources. Nothing about you or your usage is
   collected, transmitted, or logged anywhere outside your machine.
@@ -127,6 +94,56 @@ Subcommands:
 - **Config** lives at `~/.config/newsfetch/config.toml` (or
   `$XDG_CONFIG_HOME/newsfetch/config.toml`). **MIT licensed** — see
   `LICENSE`.
+
+## Power user
+
+### Config reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `topics` | `[string]` | `[]` | Bias the ranker toward these topics. Empty means no bias; ranker uses points and recency only. |
+| `style` | `string` | `"boxed"` | Render mode. One of `boxed`, `minimal`, `json`. |
+| `sources` | `[string]` | `["hackernews"]` | Where to fetch from. Drawn from the supported list (`hackernews`, `lobsters`). When set, must be non-empty. |
+| `count` | `int` | `1` | Stories rendered per invocation. Range `1..4`. Out-of-range values are clamped with a one-line warning at next render. |
+| `ticker_marker` | `string` | `"dot"` | Symbol prefixing each non-hero story when more than one renders. One of `dot`, `arrow`, `branch`. Visible only when `style = "boxed"` and `count > 1`. |
+| `ticker_boxed` | `bool` | `false` | `true` wraps hero plus ticker in one outer box; `false` gives the hero its own box with ticker lines beneath. Same visibility rule as `ticker_marker`. |
+| `cache_ttl_minutes` | `int` | `30` | Stale-while-revalidate window for the story cache. Floor of 5 minutes. |
+| `dedup_ttl_hours` | `int` | `6` | Window during which a rendered story is filtered out of the candidate pool. After the window passes, the story ages back in and can re-appear. Set to `0` to disable dedup entirely. |
+| `min_points` | `int` | `50` | Source-advisory floor on candidate points. Honoured by sources that have a comparable signal (HN); ignored by others (Lobste.rs). |
+
+`ticker_marker` and `ticker_boxed` are persisted unconditionally even
+when currently inert — switching `style = boxed` → `minimal` and back
+keeps prior tuning intact instead of reverting to defaults.
+
+### Scripted install (--init via JSON)
+
+`--init` skips the interactive wizard when stdin is not a TTY and reads JSON
+instead. `topics` and `style` are required; everything else is optional and
+falls back to the compile-time default.
+
+```
+echo '{"topics": ["rust", "ai"], "style": "boxed"}' | newsfetch --init
+echo '{"topics": [], "style": "boxed", "sources": ["hackernews", "lobsters"]}' | newsfetch --init
+echo '{"topics": ["rust"], "style": "boxed", "count": 3, "ticker_marker": "branch"}' | newsfetch --init
+```
+
+Field validation matches the [config reference](#config-reference).
+Unknown JSON fields are rejected (better fail loud than silently lose a
+typo'd key).
+
+### Scripted edit (--settings via JSON)
+
+`--settings` is the equivalent of `--init` for changing your existing
+config. `topics`, `style`, `sources`, and `count` are required;
+`ticker_marker` and `ticker_boxed` are optional and preserve current
+config values when omitted (matches the wizard's hide-when-inert
+behaviour, so toggling `style = boxed` → `minimal` and back through
+scripted edits doesn't silently lose ticker tuning).
+
+```
+echo '{"topics": ["rust"], "style": "minimal", "sources": ["hackernews"], "count": 1}' | newsfetch --settings
+echo '{"topics": ["rust"], "style": "boxed", "sources": ["hackernews"], "count": 3, "ticker_marker": "branch", "ticker_boxed": false}' | newsfetch --settings
+```
 
 ## Status
 
