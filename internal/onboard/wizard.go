@@ -34,9 +34,10 @@ var styleOptions = []huh.Option[string]{
 
 // countOptions defines the per-render story-count picker, surfaced in the
 // settings wizard. Capped at defaults.MaxCount; values above turn hero+ticker
-// into a list, which the spec deliberately rejects.
+// into a list, which the spec deliberately rejects. Labels are kept tight
+// for inline (single-row) display.
 var countOptions = []huh.Option[int]{
-	huh.NewOption("1 (single story)", 1),
+	huh.NewOption("1", 1),
 	huh.NewOption("2", 2),
 	huh.NewOption("3", 3),
 	huh.NewOption("4", 4),
@@ -174,6 +175,7 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 				Title("Stories per render").
 				Description("How many stories appear each invocation.").
 				Filtering(false).
+				Inline(true).
 				Options(countOptions...).
 				Value(&a.Count),
 		),
