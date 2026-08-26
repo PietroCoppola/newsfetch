@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -22,12 +23,29 @@ import (
 // payload is a few KB; the bound only guards against a runaway pipe.
 const maxStdinPayload = 1 << 20
 
+// errNoCachedStories reports that the cache had nothing to select from, so
+// no story could be pinned. It travels out of the pin-creation closure to
+// the caller, which answers it the way the unpinned path answers a cache
+// miss: print nothing, spawn a refresh.
+var errNoCachedStories = errors.New("statusline: no cached stories")
+
+// errNoStorySelected reports that selection returned nothing from a
+// non-empty pool. Nothing to pin, and nothing to render.
+var errNoStorySelected = errors.New("statusline: selection produced no story")
+
 // runStatusline renders the single-line statusline style. Design contract
 // (docs/planning/statusline.md): never block on the network — a cache miss
 // renders nothing and leaves a detached refresh behind; the next render
 // picks up the warmed cache. Story selection is pinned to cli.pin (or the
 // key extracted from the statusline stdin JSON) so re-renders within one
 // user turn are stable; a new key selects fresh, records history, and pins.
+//
+// Selection and pinning happen inside one session.GetOrCreate, so the
+// several renders a single user turn can fire concurrently agree on one
+// story instead of each selecting its own and racing to persist it. If the
+// store is unreachable — a wedged lock, an unresolvable path — the render
+// degrades to an unpinned fresh selection: a wedged lock should cost
+// stickiness, not the status row.
 func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, rng *rand.Rand) error {
 	pin := resolvePinKey(cli.pin, os.Stdin)
 	width := cli.maxWidth
@@ -35,16 +53,29 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 		width = defaults.TermWidth(defaults.BoxWidth)
 	}
 
-	// Pin hit: render the stored story and stop. No cache read, no history
-	// write, no refresh check — this is the every-assistant-message path
-	// and stays as close to a single file read as possible.
 	if pin != "" {
 		if sPath, err := session.Path(); err == nil {
-			if f, err := session.Read(sPath); err == nil {
-				if e, ok := f.Lookup(pin); ok {
-					fmt.Fprint(out, render.Statusline(fetch.Story{Title: e.Title, URL: e.URL}, width))
-					return nil
+			// Set only when the entry is created here; a pin hit reads
+			// no cache and so has no staleness to report.
+			stale := false
+			e, err := session.GetOrCreate(sPath, pin, func() (session.Entry, error) {
+				return selectPinnedStory(cfg, errOut, rng, pin, &stale)
+			})
+			switch {
+			case err == nil:
+				fmt.Fprint(out, render.Statusline(fetch.Story{Title: e.Title, URL: e.URL}, width))
+				if stale {
+					spawnRefresh()
 				}
+				return nil
+			case errors.Is(err, errNoCachedStories):
+				// Empty output beats a "no fresh news" line: in a status
+				// row, silence is less noisy than an error banner.
+				spawnRefresh()
+				return nil
+			default:
+				fmt.Fprintln(errOut, "newsfetch: warning: session pin:", err)
+				// Fall through: render unpinned rather than not at all.
 			}
 		}
 	}
@@ -56,8 +87,6 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	now := time.Now().UTC()
 	f, readErr := cache.Read(path)
 	if readErr != nil || len(f.Stories) == 0 {
-		// Empty output beats a "no fresh news" line: in a status row,
-		// silence is less noisy than an error banner.
 		spawnRefresh()
 		return nil
 	}
@@ -72,22 +101,44 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	if len(picked) == 0 {
 		return nil
 	}
-	s := picked[0]
-	fmt.Fprint(out, render.Statusline(s, width))
+	fmt.Fprint(out, render.Statusline(picked[0], width))
 	recordHistory(picked, now, errOut)
-	if pin != "" {
-		if sPath, err := session.Path(); err == nil {
-			if pinErr := session.Pin(sPath, session.Entry{
-				Key: pin, Hash: s.Hash(), Title: s.Title, URL: s.URL, PinnedAt: now,
-			}); pinErr != nil {
-				fmt.Fprintln(errOut, "newsfetch: warning: session pin:", pinErr)
-			}
-		}
-	}
 	if !f.IsFresh(cfg.CacheTTL, now) {
 		spawnRefresh()
 	}
 	return nil
+}
+
+// selectPinnedStory picks the story to pin for one user turn: read the
+// cache, select against history, record what was selected. It runs under
+// the session lock as session.GetOrCreate's create callback, so exactly one
+// concurrent render reaches it per key. stale is set when the cache it read
+// was past its TTL — the caller spawns the refresh once the lock is
+// released rather than holding it across a process spawn.
+func selectPinnedStory(cfg config.Config, errOut io.Writer, rng *rand.Rand, pin string, stale *bool) (session.Entry, error) {
+	path, err := cache.Path()
+	if err != nil {
+		return session.Entry{}, err
+	}
+	now := time.Now().UTC()
+	f, readErr := cache.Read(path)
+	if readErr != nil || len(f.Stories) == 0 {
+		return session.Entry{}, errNoCachedStories
+	}
+	seen := loadSeen(cfg, now, errOut)
+	cfgOne := cfg
+	cfgOne.Count = 1
+	picked, err := selectFromPool(f.Stories, seen, cfgOne, now, rng)
+	if err != nil {
+		return session.Entry{}, err
+	}
+	if len(picked) == 0 {
+		return session.Entry{}, errNoStorySelected
+	}
+	s := picked[0]
+	recordHistory(picked, now, errOut)
+	*stale = !f.IsFresh(cfg.CacheTTL, now)
+	return session.Entry{Key: pin, Hash: s.Hash(), Title: s.Title, URL: s.URL, PinnedAt: now}, nil
 }
 
 // resolvePinKey returns the story-pinning key: an explicit --pin wins;

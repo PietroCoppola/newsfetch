@@ -10,6 +10,7 @@ import (
 
 	"github.com/PietroCoppola/newsfetch/internal/cache"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/history"
 	"github.com/PietroCoppola/newsfetch/internal/session"
 )
 
@@ -83,6 +84,43 @@ func TestStatusline_NewPinKeySelectsFreshStory(t *testing.T) {
 	if len(f.Entries) != 2 {
 		t.Errorf("session entries = %d, want 2", len(f.Entries))
 	}
+}
+
+// TestStatusline_PinHitWritesNoHistory guards the invariant a pin exists
+// to hold: one story, and one history entry, per user turn. A re-render on
+// the same key must reuse the pinned entry rather than reselect and record
+// a second story.
+func TestStatusline_PinHitWritesNoHistory(t *testing.T) {
+	seedStatuslineEnv(t, 8)
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=X")
+	if first == "" {
+		t.Fatal("first pinned render produced no output")
+	}
+	if got := historyLen(t); got != 1 {
+		t.Fatalf("history entries after first render = %d, want 1", got)
+	}
+	second := runStatuslineArgs(t, 999, "--style=statusline", "--pin=X")
+	if second != first {
+		t.Errorf("pin hit re-rendered a different story:\n first = %q\nsecond = %q", first, second)
+	}
+	if got := historyLen(t); got != 1 {
+		t.Errorf("history entries after pin hit = %d, want 1 (a pin hit records nothing)", got)
+	}
+}
+
+// historyLen reports how many entries seen.json holds under the isolated
+// XDG state dir.
+func historyLen(t *testing.T) int {
+	t.Helper()
+	path, err := history.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := history.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(f.Entries)
 }
 
 func TestStatusline_NoPinStillRenders(t *testing.T) {

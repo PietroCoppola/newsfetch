@@ -112,13 +112,59 @@ func (f *File) Lookup(key string) (Entry, bool) {
 // treated as an empty starting state — losing pins to corruption is
 // better than refusing all subsequent writes.
 func Pin(path string, e Entry) error {
+	_, err := update(path, func(*File) (Entry, bool, error) {
+		return e, true, nil
+	})
+	return err
+}
+
+// GetOrCreate returns the entry pinned under key, creating it with
+// create() if absent — atomically: the sessions lock is held across
+// lookup, create, and persist, so concurrent same-key callers serialize
+// and every caller after the first receives the first caller's entry
+// with create never re-invoked. create's error aborts without
+// persisting and is returned wrapped.
+//
+// This is what makes one prompt_id mean one story: a plain
+// lookup-then-pin lets every concurrent statusline render miss, select
+// its own story, and overwrite the others.
+//
+// create need not set Entry.Key — an empty one is filled in with key.
+func GetOrCreate(path, key string, create func() (Entry, error)) (Entry, error) {
+	return update(path, func(f *File) (Entry, bool, error) {
+		if e, ok := f.Lookup(key); ok {
+			return e, false, nil
+		}
+		e, err := create()
+		if err != nil {
+			return Entry{}, false, fmt.Errorf("create session entry: %w", err)
+		}
+		if e.Key == "" {
+			e.Key = key
+		}
+		return e, true, nil
+	})
+}
+
+// update runs mutate against the pin store at path while holding an
+// exclusive advisory lock on the sidecar sessions.lock, then persists the
+// returned entry when mutate asks for a write. Holding the lock across the
+// whole read-modify-write is what both [Pin] and [GetOrCreate] need — the
+// difference between them is only what mutate decides. The persisted entry
+// replaces any existing one with the same key, the store is pruned to the
+// most recent [MaxEntries], and the write is atomic (temp file + rename).
+//
+// A read failure (missing, corrupt, schema mismatch) is treated as an empty
+// starting state — losing pins to corruption is better than refusing all
+// subsequent writes.
+func update(path string, mutate func(*File) (Entry, bool, error)) (Entry, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create sessions dir: %w", err)
+		return Entry{}, fmt.Errorf("create sessions dir: %w", err)
 	}
 	lock, err := lockfile.Acquire(filepath.Join(dir, "sessions.lock"), time.Second)
 	if err != nil {
-		return err
+		return Entry{}, err
 	}
 	defer lock.Close() // close releases the flock
 
@@ -126,6 +172,11 @@ func Pin(path string, e Entry) error {
 	if err != nil {
 		f = &File{Version: SchemaVersion}
 	}
+	e, write, err := mutate(f)
+	if err != nil || !write {
+		return e, err
+	}
+
 	kept := f.Entries[:0]
 	for _, old := range f.Entries {
 		if old.Key != e.Key {
@@ -140,25 +191,25 @@ func Pin(path string, e Entry) error {
 
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode sessions: %w", err)
+		return Entry{}, fmt.Errorf("encode sessions: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, "sessions-*.json.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp sessions: %w", err)
+		return Entry{}, fmt.Errorf("create temp sessions: %w", err)
 	}
 	tmpPath := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return fmt.Errorf("write temp sessions: %w", err)
+		return Entry{}, fmt.Errorf("write temp sessions: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("close temp sessions: %w", err)
+		return Entry{}, fmt.Errorf("close temp sessions: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("rename temp sessions: %w", err)
+		return Entry{}, fmt.Errorf("rename temp sessions: %w", err)
 	}
-	return nil
+	return e, nil
 }
