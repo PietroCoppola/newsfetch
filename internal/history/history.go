@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -96,12 +97,31 @@ func Read(path string) (*File, error) {
 
 // Append adds entries to the history at path and persists the result, pruned
 // to the most recent [MaxEntries]. The write is atomic (temp file + rename)
-// so a killed process cannot leave a half-written history. A missing file is
-// treated as an empty starting state.
+// so a killed process cannot leave a half-written history, and the whole
+// read-modify-write holds an exclusive advisory lock on a sidecar
+// seen.lock file: concurrent renders (a tmux or iTerm session restore
+// opens many terminals within milliseconds) would otherwise base their
+// write on the same snapshot and the last rename would silently drop the
+// others' entries. The kernel releases the lock when the process exits —
+// crashed included — so there is no stale-lock recovery to handle. A
+// missing file is treated as an empty starting state.
 //
 // Pruning keeps the tail of the slice — callers therefore must append in
 // render order (oldest first within the batch).
 func Append(path string, entries []Entry) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create history dir: %w", err)
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, "seen.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open history lock: %w", err)
+	}
+	defer lock.Close() // close releases the flock
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock history: %w", err)
+	}
+
 	f, err := Read(path)
 	if err != nil {
 		// Treat any read failure (corrupt, schema mismatch) as starting
@@ -118,10 +138,6 @@ func Append(path string, entries []Entry) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode history: %w", err)
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create history dir: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, "seen-*.json.tmp")
 	if err != nil {

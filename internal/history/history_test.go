@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -300,4 +301,43 @@ func TestAppend_RecoversFromCorruptFile(t *testing.T) {
 
 func fmtHash(prefix string, i int) string {
 	return prefix + "-" + strconv.Itoa(i)
+}
+
+// TestAppend_ConcurrentWritersRetainAllEntries pins the lost-update bug:
+// Append's read-modify-write must hold an exclusive lock, or concurrent
+// renders (a tmux or iTerm session restore opens many terminals within
+// milliseconds) base their write on the same snapshot and the last rename
+// silently drops the others' entries while every Append returns nil.
+func TestAppend_ConcurrentWritersRetainAllEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seen.json")
+	const writers = 100
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- history.Append(path, []history.Entry{{
+				Hash:       "example.com/" + strconv.Itoa(i),
+				Title:      "story " + strconv.Itoa(i),
+				URL:        "https://example.com/" + strconv.Itoa(i),
+				Source:     "hackernews",
+				RenderedAt: time.Now().UTC(),
+			}})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	f, err := history.Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(f.Entries) != writers {
+		t.Errorf("retained %d of %d entries; concurrent Appends lost updates", len(f.Entries), writers)
+	}
 }
