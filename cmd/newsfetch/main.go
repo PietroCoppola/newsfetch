@@ -205,7 +205,7 @@ func promptYesNo(in *os.File, out io.Writer) func(string) bool {
 // reads the cache, and prints a rendered story (or a fallback). Callers
 // pass an rng so tests can seed determinism.
 func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
-	cfg, _, earlyExit, err := parseAndLoad(args, errOut)
+	cfg, cli, earlyExit, err := parseAndLoad(args, errOut)
 	if err != nil {
 		return err
 	}
@@ -216,6 +216,10 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	case exitHelp:
 		printHelp(out)
 		return nil
+	}
+
+	if cfg.Style == "statusline" {
+		return runStatusline(out, errOut, cfg, cli, rng)
 	}
 
 	path, err := cache.Path()
@@ -582,7 +586,10 @@ func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now t
 	return nil
 }
 
-func spawnRefresh() {
+// spawnRefresh launches the detached background refresh. Tests MAY swap
+// this to observe or suppress the spawn, but MUST restore via t.Cleanup —
+// same contract as newSource above.
+var spawnRefresh = func() {
 	exe, err := os.Executable()
 	if err != nil {
 		return
