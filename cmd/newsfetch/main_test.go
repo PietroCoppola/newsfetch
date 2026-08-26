@@ -19,14 +19,30 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 )
 
+// isolateXDG points every XDG root (and HOME, which the XDG fallbacks
+// resolve through) at fresh temp dirs so a test can never read or write
+// the real user's cache, config, or state. Every test that invokes
+// runDefault MUST call this first: a successful render appends to
+// seen.json via history.Path, whose fallback is the real ~/.local/state,
+// and reads the real config and history when those envs leak through.
+func isolateXDG(t *testing.T) (cacheDir, configDir string) {
+	t.Helper()
+	cacheDir = t.TempDir()
+	configDir = t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	return cacheDir, configDir
+}
+
 // TestRunDefault_RendersFromFreshCache seeds a cache file under
 // XDG_CACHE_HOME and verifies runDefault prints a boxed story without going
 // near the network. The cold-start fetch-on-miss path is covered by
 // TestRunDefault_ColdStart_FetchesAndCaches below; the stochastic
 // topic-boost behaviour is covered by the WarmCache win-rate tests.
 func TestRunDefault_RendersFromFreshCache(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", dir)
+	isolateXDG(t)
 
 	path, err := cache.Path()
 	if err != nil {
@@ -135,10 +151,7 @@ func swapHNSource(t *testing.T, url string) {
 // the fetch-on-miss code path (cache.Read error, HTTP wiring, writeCache)
 // fails loudly without depending on math/rand's implementation details.
 func TestRunDefault_ColdStart_FetchesAndCaches(t *testing.T) {
-	cacheDir := t.TempDir()
-	configDir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheDir)
-	t.Setenv("XDG_CONFIG_HOME", configDir)
+	isolateXDG(t)
 
 	ts := algoliaStub()
 	defer ts.Close()
@@ -206,10 +219,7 @@ func seedTwoStoryCache(t *testing.T, now time.Time) {
 // CI flakiness is expensive; a missed regression here is also caught by
 // unit tests in internal/rank.
 func TestRunDefault_WarmCache_TopicBoostFavorsMatch_WinRate(t *testing.T) {
-	cacheDir := t.TempDir()
-	configDir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheDir)
-	t.Setenv("XDG_CONFIG_HOME", configDir)
+	_, configDir := isolateXDG(t)
 	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -245,10 +255,7 @@ func TestRunDefault_WarmCache_TopicBoostFavorsMatch_WinRate(t *testing.T) {
 // ~50 → 55 is ~1σ above, so the test catches that regression ~84% of
 // the time (per-run basis; CI runs accumulate).
 func TestRunDefault_WarmCache_TopicsFlagEmptyOverridesConfig_WinRate(t *testing.T) {
-	cacheDir := t.TempDir()
-	configDir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheDir)
-	t.Setenv("XDG_CONFIG_HOME", configDir)
+	_, configDir := isolateXDG(t)
 	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -276,10 +283,7 @@ func TestRunDefault_WarmCache_TopicsFlagEmptyOverridesConfig_WinRate(t *testing.
 }
 
 func TestRunDefault_StyleJSON_WithInvalidConfig_StdoutIsCleanJSON(t *testing.T) {
-	cacheDir := t.TempDir()
-	configDir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheDir)
-	t.Setenv("XDG_CONFIG_HOME", configDir)
+	_, configDir := isolateXDG(t)
 	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
