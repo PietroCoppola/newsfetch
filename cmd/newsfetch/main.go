@@ -226,8 +226,13 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	seen := loadSeen(cfg, now, errOut)
 	f, readErr := cache.Read(path)
 	if readErr == nil && len(f.Stories) > 0 {
-		picked := selectFromPool(f.Stories, seen, cfg, now, rng)
-		writeStories(out, picked, cfg, now)
+		picked, err := selectFromPool(f.Stories, seen, cfg, now, rng)
+		if err != nil {
+			return err
+		}
+		if err := writeStories(out, picked, cfg, now); err != nil {
+			return err
+		}
 		recordHistory(picked, now, errOut)
 		if !f.IsFresh(cfg.CacheTTL, now) {
 			spawnRefresh()
@@ -248,8 +253,13 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg.Sources)))
 		return nil
 	}
-	picked := selectFromPool(stories, seen, cfg, now, rng)
-	writeStories(out, picked, cfg, now)
+	picked, err := selectFromPool(stories, seen, cfg, now, rng)
+	if err != nil {
+		return err
+	}
+	if err := writeStories(out, picked, cfg, now); err != nil {
+		return err
+	}
 	recordHistory(picked, now, errOut)
 	// Full-replace on partial fetch: a failed source's prior stories drop
 	// out of the cache rather than ghosting indefinitely. Self-healing on
@@ -293,16 +303,20 @@ func loadSeen(cfg config.Config, now time.Time, errOut io.Writer) map[string]str
 // pool has been seen, the filter is bypassed so the user gets a render
 // rather than the offline fallback — eventual repeats beat eventual
 // silence.
-func selectFromPool(pool []fetch.Story, seen map[string]struct{}, cfg config.Config, now time.Time, rng *rand.Rand) []fetch.Story {
+func selectFromPool(pool []fetch.Story, seen map[string]struct{}, cfg config.Config, now time.Time, rng *rand.Rand) ([]fetch.Story, error) {
 	candidates := rank.Filter(pool, seen)
 	if len(candidates) == 0 {
 		candidates = pool
 	}
-	return rank.SelectN(candidates, cfg.Count, rank.Options{
+	picked, err := rank.SelectN(candidates, cfg.Count, rank.Options{
 		Topics:   cfg.Topics,
 		Now:      now,
 		PoolSize: defaults.RankPoolSize,
 	}, rng)
+	if err != nil {
+		return nil, fmt.Errorf("select stories: %w", err)
+	}
+	return picked, nil
 }
 
 // recordHistory appends the rendered stories to seen.json in render order
@@ -522,9 +536,9 @@ func writeCache(path string, stories []fetch.Story, at time.Time) error {
 //   - minimal: N stacked minimal lines (literal repetition, no decoration).
 //   - json:    one JSON object when len==1, a JSON array when len>1, so
 //     existing single-story scripted consumers stay unbroken.
-func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now time.Time) {
+func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now time.Time) error {
 	if len(stories) == 0 {
-		return
+		return nil
 	}
 	switch cfg.Style {
 	case "minimal":
@@ -534,15 +548,20 @@ func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now t
 	case "json":
 		if len(stories) == 1 {
 			fmt.Fprint(out, render.JSON(stories[0], now))
-			return
+			return nil
 		}
 		fmt.Fprint(out, render.JSONMulti(stories, now))
 	default:
-		fmt.Fprint(out, render.Multi(stories, now, defaults.TermWidth(defaults.BoxWidth), render.MultiOptions{
+		rendered, err := render.Multi(stories, now, defaults.TermWidth(defaults.BoxWidth), render.MultiOptions{
 			Marker: render.TickerMarker(cfg.TickerMarker),
 			Boxed:  cfg.TickerBoxed,
-		}))
+		})
+		if err != nil {
+			return fmt.Errorf("render: %w", err)
+		}
+		fmt.Fprint(out, rendered)
 	}
+	return nil
 }
 
 func spawnRefresh() {

@@ -4,6 +4,7 @@
 package rank
 
 import (
+	"errors"
 	"math"
 	"math/rand"
 	"sort"
@@ -170,12 +171,13 @@ type Options struct {
 // Select scores every story in stories, keeps the top PoolSize candidates,
 // and picks one weighted by score using rng.
 //
-// Callers must pass a non-empty slice. On empty input Select PANICS — the
-// same contract M1's selectStory used. Returning a zero Story silently
-// would propagate bugs; panic gives an immediate, traceable failure.
-func Select(stories []fetch.Story, opts Options, rng *rand.Rand) fetch.Story {
+// Callers must pass a non-empty slice; an empty one returns an error.
+// Selection from nothing indicates a caller bug upstream (the render path
+// guards the pool before selecting), and returning a zero Story silently
+// would propagate it.
+func Select(stories []fetch.Story, opts Options, rng *rand.Rand) (fetch.Story, error) {
 	if len(stories) == 0 {
-		panic("rank.Select: stories must be non-empty")
+		return fetch.Story{}, errors.New("select from empty story pool")
 	}
 	pool := opts.PoolSize
 	if pool <= 0 {
@@ -199,5 +201,5 @@ func Select(stories []fetch.Story, opts Options, rng *rand.Rand) fetch.Story {
 	for i, sc := range all {
 		weights[i] = sc.w
 	}
-	return all[pickWeightedIndex(weights, rng)].s
+	return all[pickWeightedIndex(weights, rng)].s, nil
 }

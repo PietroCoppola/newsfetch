@@ -38,7 +38,7 @@ func fixtureStories(now time.Time) []fetch.Story {
 func TestMulti_SingleStoryDelegatesToBoxed(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	stories := fixtureStories(now)[:1]
-	got := render.Multi(stories, now, 80, render.MultiOptions{Marker: render.TickerDot})
+	got := mustMulti(t, stories, now, 80, render.MultiOptions{Marker: render.TickerDot})
 	want := render.Boxed(stories[0], now, 80)
 	if got != want {
 		t.Errorf("single-story Multi did not match Boxed\ngot:\n%s\nwant:\n%s", got, want)
@@ -48,7 +48,7 @@ func TestMulti_SingleStoryDelegatesToBoxed(t *testing.T) {
 func TestMulti_PlainTickerLines(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	stories := fixtureStories(now)
-	got := render.Multi(stories, now, 80, render.MultiOptions{Marker: render.TickerDot})
+	got := mustMulti(t, stories, now, 80, render.MultiOptions{Marker: render.TickerDot})
 	// Plain tickers: hero box, then two-space + bullet + body lines.
 	if !strings.Contains(got, "  · Second story — blog.rust-lang.org (5h ago)\n") {
 		t.Errorf("missing expected dot ticker line; got:\n%s", got)
@@ -61,7 +61,7 @@ func TestMulti_PlainTickerLines(t *testing.T) {
 func TestMulti_BoxedTickersInsideBox(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	stories := fixtureStories(now)
-	got := render.Multi(stories, now, 80, render.MultiOptions{Marker: render.TickerDot, Boxed: true})
+	got := mustMulti(t, stories, now, 80, render.MultiOptions{Marker: render.TickerDot, Boxed: true})
 	if !strings.Contains(got, "├") || !strings.Contains(got, "┤") {
 		t.Errorf("expected divider with ├/┤ inside boxed render; got:\n%s", got)
 	}
@@ -73,7 +73,7 @@ func TestMulti_BoxedTickersInsideBox(t *testing.T) {
 func TestMulti_BranchAddsSpine(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	stories := fixtureStories(now)
-	plain := render.Multi(stories, now, 80, render.MultiOptions{Marker: render.TickerBranch})
+	plain := mustMulti(t, stories, now, 80, render.MultiOptions{Marker: render.TickerBranch})
 	if !strings.Contains(plain, "╰─┬") {
 		t.Errorf("plain branch render missing ╰─┬ spine anchor on hero bottom; got:\n%s", plain)
 	}
@@ -84,7 +84,7 @@ func TestMulti_BranchAddsSpine(t *testing.T) {
 		t.Errorf("plain branch render missing └─ terminator on last entry; got:\n%s", plain)
 	}
 
-	boxed := render.Multi(stories, now, 80, render.MultiOptions{Marker: render.TickerBranch, Boxed: true})
+	boxed := mustMulti(t, stories, now, 80, render.MultiOptions{Marker: render.TickerBranch, Boxed: true})
 	if !strings.Contains(boxed, "├─┬") {
 		t.Errorf("boxed branch render missing ├─┬ spine anchor on divider; got:\n%s", boxed)
 	}
@@ -93,7 +93,7 @@ func TestMulti_BranchAddsSpine(t *testing.T) {
 func TestMulti_ArrowMarker(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	stories := fixtureStories(now)
-	got := render.Multi(stories, now, 80, render.MultiOptions{Marker: render.TickerArrow})
+	got := mustMulti(t, stories, now, 80, render.MultiOptions{Marker: render.TickerArrow})
 	if !strings.Contains(got, "  ↳ Second story") {
 		t.Errorf("arrow marker not applied; got:\n%s", got)
 	}
@@ -103,7 +103,7 @@ func TestMulti_TickerTruncationKeepsHostAndAge(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	stories := fixtureStories(now)
 	stories[1].Title = strings.Repeat("very long title ", 20)
-	got := render.Multi(stories, now, 60, render.MultiOptions{Marker: render.TickerDot})
+	got := mustMulti(t, stories, now, 60, render.MultiOptions{Marker: render.TickerDot})
 	// Even with a runaway title, host and age suffix must survive.
 	if !strings.Contains(got, "blog.rust-lang.org") {
 		t.Errorf("host stripped by truncation; got:\n%s", got)
@@ -113,13 +113,21 @@ func TestMulti_TickerTruncationKeepsHostAndAge(t *testing.T) {
 	}
 }
 
-func TestMulti_PanicsOnEmpty(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Error("expected panic on empty slice")
-		}
-	}()
-	render.Multi(nil, time.Now(), 80, render.MultiOptions{})
+// mustMulti unwraps Multi for tests whose inputs are valid by
+// construction.
+func mustMulti(t *testing.T, stories []fetch.Story, now time.Time, width int, opts render.MultiOptions) string {
+	t.Helper()
+	got, err := render.Multi(stories, now, width, opts)
+	if err != nil {
+		t.Fatalf("Multi: %v", err)
+	}
+	return got
+}
+
+func TestMulti_ErrorsOnEmpty(t *testing.T) {
+	if _, err := render.Multi(nil, time.Now(), 80, render.MultiOptions{}); err == nil {
+		t.Error("expected error on empty slice")
+	}
 }
 
 func TestJSONMulti_EmitsArray(t *testing.T) {

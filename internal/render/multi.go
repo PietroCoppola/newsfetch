@@ -2,6 +2,7 @@ package render
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -46,9 +47,10 @@ type MultiOptions struct {
 // and the ticker line budget. now is the reference time for relative ages.
 //
 // On a single-story slice Multi delegates to [Boxed] (no tickers, no
-// marker decisions to make). On an empty slice it PANICS — the renderer
-// is downstream of selection, which guarantees at least one story by the
-// time we get here.
+// marker decisions to make). An empty slice returns an error — the
+// renderer is downstream of selection, which guarantees at least one
+// story by the time we get here, so an empty slice is a caller bug and
+// the error surfaces it traceably.
 //
 // Ticker line content: "title — host (age)". Author is intentionally
 // omitted; ticker lines are glanceable subordinate context, not full
@@ -59,17 +61,17 @@ type MultiOptions struct {
 // Display-column-aware truncation (CJK/emoji width) is a polish item
 // targeted for a later width sweep; this function uses the same
 // rune-count rule as [Boxed].
-func Multi(stories []fetch.Story, now time.Time, width int, opts MultiOptions) string {
+func Multi(stories []fetch.Story, now time.Time, width int, opts MultiOptions) (string, error) {
 	if len(stories) == 0 {
-		panic("render.Multi: stories must be non-empty")
+		return "", errors.New("render multi-story: no stories")
 	}
 	if len(stories) == 1 {
-		return Boxed(stories[0], now, width)
+		return Boxed(stories[0], now, width), nil
 	}
 	if opts.Boxed {
-		return renderMultiBoxed(stories, now, width, opts.Marker)
+		return renderMultiBoxed(stories, now, width, opts.Marker), nil
 	}
-	return renderMultiPlain(stories, now, width, opts.Marker)
+	return renderMultiPlain(stories, now, width, opts.Marker), nil
 }
 
 // renderMultiPlain renders the hero in its own box with ticker lines below.

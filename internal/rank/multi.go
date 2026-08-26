@@ -1,6 +1,8 @@
 package rank
 
 import (
+	"errors"
+	"fmt"
 	"math/rand"
 	"sort"
 
@@ -34,14 +36,16 @@ const (
 // than padding or erroring — the caller decides whether "fewer than
 // requested" needs to be surfaced.
 //
-// On empty input SelectN PANICS, matching [Select]'s contract. n <= 0 also
-// panics; "select zero stories" is a caller bug, not a runtime condition.
-func SelectN(stories []fetch.Story, n int, opts Options, rng *rand.Rand) []fetch.Story {
+// Empty input and n <= 0 return errors, matching [Select]'s contract:
+// both indicate a caller bug (the render path guards the pool, and the
+// validator clamps count to [1, MaxCount] before selection), and an
+// error surfaces that bug traceably instead of propagating zero values.
+func SelectN(stories []fetch.Story, n int, opts Options, rng *rand.Rand) ([]fetch.Story, error) {
 	if len(stories) == 0 {
-		panic("rank.SelectN: stories must be non-empty")
+		return nil, errors.New("select from empty story pool")
 	}
 	if n <= 0 {
-		panic("rank.SelectN: n must be positive")
+		return nil, fmt.Errorf("selection count %d is not positive", n)
 	}
 	pool := opts.PoolSize
 	if pool <= 0 {
@@ -85,7 +89,7 @@ func SelectN(stories []fetch.Story, n int, opts Options, rng *rand.Rand) []fetch
 		all = append(all[:bestIdx], all[bestIdx+1:]...)
 	}
 
-	return picked
+	return picked, nil
 }
 
 // diversityMultiplier returns the score-attenuation factor for candidate

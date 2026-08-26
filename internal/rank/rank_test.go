@@ -229,15 +229,11 @@ func TestScore_AgeDecay(t *testing.T) {
 	}
 }
 
-func TestSelect_EmptyPanics(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("Select with empty slice did not panic")
-		}
-	}()
+func TestSelect_ErrorsOnEmpty(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	_ = Select(nil, Options{Now: time.Now()}, rng)
+	if _, err := Select(nil, Options{Now: time.Now()}, rng); err == nil {
+		t.Fatal("Select with empty slice did not return an error")
+	}
 }
 
 func TestSelect_DeterministicWithSeed(t *testing.T) {
@@ -248,8 +244,11 @@ func TestSelect_DeterministicWithSeed(t *testing.T) {
 		{ID: "c", Title: "Gamma", Points: 150, CreatedAt: now.Add(-3 * time.Hour), Tags: []string{}},
 	}
 	opts := Options{Now: now, PoolSize: 3}
-	a := Select(stories, opts, rand.New(rand.NewSource(17)))
-	b := Select(stories, opts, rand.New(rand.NewSource(17)))
+	a, aErr := Select(stories, opts, rand.New(rand.NewSource(17)))
+	b, bErr := Select(stories, opts, rand.New(rand.NewSource(17)))
+	if aErr != nil || bErr != nil {
+		t.Fatalf("Select: %v / %v", aErr, bErr)
+	}
 	if a.ID != b.ID {
 		t.Errorf("Select not deterministic under same seed: %q vs %q", a.ID, b.ID)
 	}
@@ -281,7 +280,10 @@ func TestSelect_PoolSizeCap_Rank11NeverPicked(t *testing.T) {
 	}
 	opts := Options{Now: now, PoolSize: 10}
 	for seed := int64(0); seed < 200; seed++ {
-		got := Select(stories, opts, rand.New(rand.NewSource(seed)))
+		got, err := Select(stories, opts, rand.New(rand.NewSource(seed)))
+		if err != nil {
+			t.Fatalf("Select: %v", err)
+		}
 		if got.ID == fmtID(10) {
 			t.Fatalf("rank-11 story picked at seed %d", seed)
 		}
@@ -311,7 +313,10 @@ func TestSelect_PoolSizeCap_Rank10CanBePicked(t *testing.T) {
 	opts := Options{Now: now, PoolSize: 10}
 	tenthWon := false
 	for seed := int64(0); seed < 200; seed++ {
-		got := Select(stories, opts, rand.New(rand.NewSource(seed)))
+		got, err := Select(stories, opts, rand.New(rand.NewSource(seed)))
+		if err != nil {
+			t.Fatalf("Select: %v", err)
+		}
 		if got.ID == fmtID(9) {
 			tenthWon = true
 			break
