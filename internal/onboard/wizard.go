@@ -10,53 +10,66 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 )
 
-// topicOptions defines the topic multi-select choices used by both wizards.
-// Kept as a package-level slice so --init and --settings present an
-// identical menu — adding or removing a topic is a one-line change.
-var topicOptions = []huh.Option[string]{
-	huh.NewOption("AI / LLMs", "ai"),
-	huh.NewOption("Rust", "rust"),
-	huh.NewOption("Go", "go"),
-	huh.NewOption("Python", "python"),
-	huh.NewOption("JavaScript / TypeScript", "javascript"),
-	huh.NewOption("Databases", "databases"),
-	huh.NewOption("Security", "security"),
-	huh.NewOption("Systems / OS / kernels", "systems"),
-	huh.NewOption("DevOps / infrastructure", "devops"),
-	huh.NewOption("Hardware", "hardware"),
+// topicOptions defines the topic multi-select choices used by both wizards
+// (one shared function keeps --init and --settings menus identical; adding
+// or removing a topic is a one-line change). All option tables are
+// functions, not package-level slices: nothing is constructed at package
+// init, which the hot render path pays for despite never running a
+// wizard, and no package-level mutable state is left exposed.
+func topicOptions() []huh.Option[string] {
+	return []huh.Option[string]{
+		huh.NewOption("AI / LLMs", "ai"),
+		huh.NewOption("Rust", "rust"),
+		huh.NewOption("Go", "go"),
+		huh.NewOption("Python", "python"),
+		huh.NewOption("JavaScript / TypeScript", "javascript"),
+		huh.NewOption("Databases", "databases"),
+		huh.NewOption("Security", "security"),
+		huh.NewOption("Systems / OS / kernels", "systems"),
+		huh.NewOption("DevOps / infrastructure", "devops"),
+		huh.NewOption("Hardware", "hardware"),
+	}
 }
 
 // styleOptions defines the display-style picker choices, used by both wizards.
-var styleOptions = []huh.Option[string]{
-	huh.NewOption("Boxed (framed, default)", "boxed"),
-	huh.NewOption("Minimal (one line)", "minimal"),
-	huh.NewOption("JSON (machine-readable)", "json"),
+func styleOptions() []huh.Option[string] {
+	return []huh.Option[string]{
+		huh.NewOption("Boxed (framed, default)", "boxed"),
+		huh.NewOption("Minimal (one line)", "minimal"),
+		huh.NewOption("JSON (machine-readable)", "json"),
+	}
 }
 
 // countOptions defines the per-render story-count picker, surfaced in the
 // settings wizard. Capped at defaults.MaxCount; values above turn hero+ticker
 // into a list, which the spec deliberately rejects. Labels are kept tight
 // for inline (single-row) display.
-var countOptions = []huh.Option[int]{
-	huh.NewOption("1", 1),
-	huh.NewOption("2", 2),
-	huh.NewOption("3", 3),
-	huh.NewOption("4", 4),
+func countOptions() []huh.Option[int] {
+	return []huh.Option[int]{
+		huh.NewOption("1", 1),
+		huh.NewOption("2", 2),
+		huh.NewOption("3", 3),
+		huh.NewOption("4", 4),
+	}
 }
 
 // tickerMarkerOptions defines the ticker-marker picker. Names mirror
 // render.KnownTickerMarkers; the labels carry a one-glyph preview so the
 // user can tell them apart without remembering what each name draws.
-var tickerMarkerOptions = []huh.Option[string]{
-	huh.NewOption("Dot · (default, neutral)", "dot"),
-	huh.NewOption("Arrow ↳ (continuation)", "arrow"),
-	huh.NewOption("Branch ├─ (tree)", "branch"),
+func tickerMarkerOptions() []huh.Option[string] {
+	return []huh.Option[string]{
+		huh.NewOption("Dot · (default, neutral)", "dot"),
+		huh.NewOption("Arrow ↳ (continuation)", "arrow"),
+		huh.NewOption("Branch ├─ (tree)", "branch"),
+	}
 }
 
 // tickerBoxedOptions defines the box-style picker for multi-story renders.
-var tickerBoxedOptions = []huh.Option[bool]{
-	huh.NewOption("Plain (hero box, ticker lines beneath)", false),
-	huh.NewOption("Connected (one outer box around hero plus ticker)", true),
+func tickerBoxedOptions() []huh.Option[bool] {
+	return []huh.Option[bool]{
+		huh.NewOption("Plain (hero box, ticker lines beneath)", false),
+		huh.NewOption("Connected (one outer box around hero plus ticker)", true),
+	}
 }
 
 // sourceOptions builds the source multi-select choices from the canonical
@@ -114,12 +127,12 @@ func RunInitWizard() (Answers, error) {
 				Title("Pick topics that interest you").
 				Description("These bias which stories surface. Leave empty to see whatever's hot.").
 				Filterable(false).
-				Options(topicOptions...).
+				Options(topicOptions()...).
 				Value(&a.Topics),
 			huh.NewSelect[string]().
 				Title("Display style").
 				Filtering(false).
-				Options(styleOptions...).
+				Options(styleOptions()...).
 				Value(&a.Style),
 		),
 	).WithKeyMap(initKeyMap())
@@ -171,7 +184,7 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 				Title("Topics").
 				Description("These bias which stories surface. Leave empty to see whatever's hot.").
 				Filterable(false).
-				Options(topicOptions...).
+				Options(topicOptions()...).
 				Value(&a.Topics),
 			huh.NewMultiSelect[string]().
 				Title("Sources").
@@ -188,14 +201,14 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 			huh.NewSelect[string]().
 				Title("Display style").
 				Filtering(false).
-				Options(styleOptions...).
+				Options(styleOptions()...).
 				Value(&a.Style),
 			huh.NewSelect[int]().
 				Title("Stories per render").
 				Description("How many stories appear each invocation.").
 				Filtering(false).
 				Inline(true).
-				Options(countOptions...).
+				Options(countOptions()...).
 				Value(&a.Count),
 		),
 		// Group 2: only relevant when more than one story renders inside a
@@ -208,12 +221,12 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 				Title("Ticker marker").
 				Description("Symbol prefixing each non-hero story.").
 				Filtering(false).
-				Options(tickerMarkerOptions...).
+				Options(tickerMarkerOptions()...).
 				Value(&a.TickerMarker),
 			huh.NewSelect[bool]().
 				Title("Ticker box style").
 				Filtering(false).
-				Options(tickerBoxedOptions...).
+				Options(tickerBoxedOptions()...).
 				Value(&a.TickerBoxed),
 		).WithHideFunc(func() bool {
 			return a.Style != "boxed" || a.Count <= 1
