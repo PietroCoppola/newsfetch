@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 
+	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 )
 
@@ -105,7 +106,7 @@ type Answers struct {
 // user's choices with Sources unset (nil). Not unit-tested — the TUI is
 // exercised via manual smoke.
 func RunInitWizard() (Answers, error) {
-	var a Answers
+	a := defaultInitAnswers()
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
@@ -125,6 +126,23 @@ func RunInitWizard() (Answers, error) {
 		return Answers{}, err
 	}
 	return a, nil
+}
+
+// defaultInitAnswers is the starting state for the --init wizard: every
+// field the form does not surface is seeded with its compile-time default
+// so the written config validates cleanly. renderConfigTOML persists
+// count/ticker_marker/ticker_boxed unconditionally on the assumption that
+// producers supply valid values — this seeding is what upholds that
+// assumption for the interactive path, mirroring ReadInitJSON's seeding
+// for the non-TTY path. Style is seeded too so the picker opens on the
+// default rather than an empty selection.
+func defaultInitAnswers() Answers {
+	return Answers{
+		Style:        defaults.Style,
+		Count:        defaults.Count,
+		TickerMarker: defaults.TickerMarker,
+		TickerBoxed:  defaults.TickerBoxed,
+	}
 }
 
 // RunSettingsWizard drives the interactive --settings UI: a topic multi-
