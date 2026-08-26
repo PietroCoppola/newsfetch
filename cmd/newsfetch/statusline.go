@@ -62,11 +62,13 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 			// no cache and so has no staleness to report.
 			stale := false
 			e, err := session.GetOrCreate(sPath, pin, func() (session.Entry, error) {
-				return selectPinnedStory(cfg, errOut, rng, pin, &stale)
+				return selectPinnedStory(cfg, errOut, rng, pin, now, &stale)
 			})
 			switch {
 			case err == nil:
-				fmt.Fprint(out, render.Statusline(fetch.Story{Title: e.Title, URL: e.URL}, now, width))
+				fmt.Fprint(out, render.Statusline(fetch.Story{
+					Title: e.Title, URL: e.URL, Author: e.Author, CreatedAt: e.CreatedAt,
+				}, now, width))
 				if stale {
 					spawnRefresh()
 				}
@@ -117,12 +119,14 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 // concurrent render reaches it per key. stale is set when the cache it read
 // was past its TTL — the caller spawns the refresh once the lock is
 // released rather than holding it across a process spawn.
-func selectPinnedStory(cfg config.Config, errOut io.Writer, rng *rand.Rand, pin string, stale *bool) (session.Entry, error) {
+//
+// The entry carries the story's author and CreatedAt so later renders of
+// the same pin reproduce this render's metadata tail exactly.
+func selectPinnedStory(cfg config.Config, errOut io.Writer, rng *rand.Rand, pin string, now time.Time, stale *bool) (session.Entry, error) {
 	path, err := cache.Path()
 	if err != nil {
 		return session.Entry{}, err
 	}
-	now := time.Now().UTC()
 	f, readErr := cache.Read(path)
 	if readErr != nil || len(f.Stories) == 0 {
 		return session.Entry{}, errNoCachedStories
@@ -140,7 +144,10 @@ func selectPinnedStory(cfg config.Config, errOut io.Writer, rng *rand.Rand, pin 
 	s := picked[0]
 	recordHistory(picked, now, errOut)
 	*stale = !f.IsFresh(cfg.CacheTTL, now)
-	return session.Entry{Key: pin, Hash: s.Hash(), Title: s.Title, URL: s.URL, PinnedAt: now}, nil
+	return session.Entry{
+		Key: pin, Hash: s.Hash(), Title: s.Title, URL: s.URL,
+		Author: s.Author, CreatedAt: s.CreatedAt, PinnedAt: now,
+	}, nil
 }
 
 // resolvePinKey returns the story-pinning key: an explicit --pin wins;

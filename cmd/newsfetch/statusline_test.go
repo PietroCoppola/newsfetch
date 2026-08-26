@@ -23,12 +23,16 @@ func seedStatuslineEnv(t *testing.T, n int) {
 	stories := make([]fetch.Story, n)
 	for i := range stories {
 		stories[i] = fetch.Story{
-			ID:        string(rune('a' + i)),
-			Title:     "Story " + string(rune('A'+i)),
-			URL:       "https://example.com/" + string(rune('a'+i)),
-			Source:    "hackernews",
-			Points:    100 + i,
-			CreatedAt: time.Now().UTC().Add(-time.Hour),
+			ID:     string(rune('a' + i)),
+			Title:  "Story " + string(rune('A'+i)),
+			URL:    "https://example.com/" + string(rune('a'+i)),
+			Source: "hackernews",
+			Points: 100 + i,
+			Author: "author-" + string(rune('a'+i)),
+			// 90 minutes sits mid-bucket, so relativeAge reads "1h ago"
+			// for every render in a test run and byte-identical output
+			// assertions cannot straddle a boundary.
+			CreatedAt: time.Now().UTC().Add(-90 * time.Minute),
 			Tags:      []string{},
 		}
 	}
@@ -96,6 +100,11 @@ func TestStatusline_PinHitWritesNoHistory(t *testing.T) {
 	if first == "" {
 		t.Fatal("first pinned render produced no output")
 	}
+	// The pinned path renders from the stored entry, so the entry has to
+	// carry author and created_at or the tail loses them.
+	if !strings.Contains(first, "\x1b[2m · example.com · 1h ago · by author-") {
+		t.Errorf("pinned render missing the metadata tail: %q", first)
+	}
 	if got := historyLen(t); got != 1 {
 		t.Fatalf("history entries after first render = %d, want 1", got)
 	}
@@ -128,6 +137,14 @@ func TestStatusline_NoPinStillRenders(t *testing.T) {
 	out := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
 	if !strings.Contains(out, "Story ") {
 		t.Errorf("unpinned render = %q, want a story line", out)
+	}
+	// The metadata tail is wired through from the selected story, dim and
+	// closed with SGR 22.
+	if !strings.Contains(out, "\x1b[2m · example.com · 1h ago · by author-") {
+		t.Errorf("render missing the dim metadata tail: %q", out)
+	}
+	if !strings.HasSuffix(out, "\x1b[22m\n") {
+		t.Errorf("render does not close dim with SGR 22: %q", out)
 	}
 }
 

@@ -19,10 +19,15 @@ func tmpPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "sessions.json")
 }
 
+// storyCreatedAt is a fixed, whole-second UTC instant: JSON round-trips it
+// exactly, so a test can compare it back without clock or monotonic noise.
+var storyCreatedAt = time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+
 func entry(key, title string) session.Entry {
 	return session.Entry{
 		Key: key, Hash: "example.com/" + key, Title: title,
-		URL: "https://example.com/" + key, PinnedAt: time.Now().UTC(),
+		URL: "https://example.com/" + key, Author: "alice",
+		CreatedAt: storyCreatedAt, PinnedAt: time.Now().UTC(),
 	}
 }
 
@@ -69,6 +74,44 @@ func TestRead_CorruptFileErrors(t *testing.T) {
 	}
 }
 
+// TestRead_SchemaVersionOneRejectedAndStoreResets covers the v1→v2 bump.
+// A store written before Entry carried Author and CreatedAt cannot render a
+// metadata tail, so Read rejects it by version and the store self-resets on
+// the next write — one flicker of pin staleness, no released schema broken.
+func TestRead_SchemaVersionOneRejectedAndStoreResets(t *testing.T) {
+	path := tmpPath(t)
+	v1 := `{"version":1,"entries":[{"key":"prompt-1","hash":"h","title":"Old","url":"https://example.com/old","pinned_at":"2026-04-27T10:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(v1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Read(path); !errors.Is(err, session.ErrSchemaVersion) {
+		t.Fatalf("Read(v1 file) error = %v, want ErrSchemaVersion", err)
+	}
+
+	created := false
+	got, err := session.GetOrCreate(path, "prompt-1", func() (session.Entry, error) {
+		created = true
+		return entry("prompt-1", "Fresh"), nil
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreate over a v1 store: %v", err)
+	}
+	if !created {
+		t.Error("GetOrCreate reused a v1 entry, want a fresh selection")
+	}
+	if got.Title != "Fresh" {
+		t.Errorf("entry = %q, want %q", got.Title, "Fresh")
+	}
+	f, err := session.Read(path)
+	if err != nil {
+		t.Fatalf("Read after reset: %v", err)
+	}
+	if f.Version != session.SchemaVersion || len(f.Entries) != 1 {
+		t.Errorf("store = version %d with %d entries, want version %d with 1",
+			f.Version, len(f.Entries), session.SchemaVersion)
+	}
+}
+
 func TestPin_RoundTripAndLookup(t *testing.T) {
 	path := tmpPath(t)
 	e := entry("prompt-1", "First story")
@@ -85,6 +128,15 @@ func TestPin_RoundTripAndLookup(t *testing.T) {
 	}
 	if got.Title != "First story" || got.URL != e.URL || got.Hash != e.Hash {
 		t.Errorf("Lookup = %+v, want %+v", got, e)
+	}
+	// Author and CreatedAt feed the render's metadata tail, so a pin hit
+	// needs them back verbatim — the cache they came from may have rolled
+	// over by the time the pin is read again.
+	if got.Author != "alice" {
+		t.Errorf("Author = %q, want %q", got.Author, "alice")
+	}
+	if !got.CreatedAt.Equal(storyCreatedAt) {
+		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, storyCreatedAt)
 	}
 	if _, ok := f.Lookup("prompt-2"); ok {
 		t.Error("Lookup(prompt-2) found, want miss")

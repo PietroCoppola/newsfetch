@@ -27,7 +27,12 @@ import (
 
 // SchemaVersion identifies the on-disk layout. Bump when Entry or File
 // gains or loses a field, or when an existing field changes semantics.
-const SchemaVersion = 1
+//
+// v2 added Entry.Author and Entry.CreatedAt for the render's metadata
+// tail. A v1 store fails [Read]'s version check and is treated as empty,
+// so pins written before the bump reset once — a single re-selection per
+// live user turn, and nothing shipped depends on v1.
+const SchemaVersion = 2
 
 // MaxEntries caps the pin store. Pin prunes to this many on every write,
 // keeping the most recent. Each Claude Code user message adds one entry,
@@ -35,13 +40,18 @@ const SchemaVersion = 1
 // still asking for it.
 const MaxEntries = 64
 
-// Entry is one pinned story.
+// Entry is one pinned story. It carries every field the statusline render
+// needs — title, URL, author, and the story's own timestamp for the
+// relative age — so a pin hit renders identically to the render that
+// created it, without consulting the cache the story came from.
 type Entry struct {
-	Key      string    `json:"key"`
-	Hash     string    `json:"hash"`
-	Title    string    `json:"title"`
-	URL      string    `json:"url"`
-	PinnedAt time.Time `json:"pinned_at"`
+	Key       string    `json:"key"`
+	Hash      string    `json:"hash"`
+	Title     string    `json:"title"`
+	URL       string    `json:"url"`
+	Author    string    `json:"author"`
+	CreatedAt time.Time `json:"created_at"`
+	PinnedAt  time.Time `json:"pinned_at"`
 }
 
 // File is the on-disk pin-store layout. JSON tags are part of the schema
