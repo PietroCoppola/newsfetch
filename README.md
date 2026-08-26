@@ -70,7 +70,7 @@ untouched):
                     repeated renders stay stable; default reads prompt_id
                     (fallback session_id) from JSON on stdin
   --max-width=<n>   statusline style: truncate to n display columns
-                    (default: terminal width, 80 if undetectable)
+                    (default 80; detected terminal width when stdout is a TTY)
 
 Subcommands:
   --init            interactive setup
@@ -148,7 +148,9 @@ echo '{"topics": ["rust"], "style": "boxed", "sources": ["hackernews"], "count":
 ### Claude Code statusline
 
 `--style=statusline` emits one line: the story title, OSC 8-hyperlinked to
-the story URL and underlined, truncated to `--max-width` display columns.
+the story URL and underlined, truncated to `--max-width` display columns
+(default 80; detected terminal width when stdout is a TTY, which a
+statusline invocation never is).
 No box, no host/age/author. Piping the Claude Code statusline JSON into it
 pins the story per user message (`prompt_id`), so the headline doesn't
 flicker as the statusline re-renders — it advances when you send a message.

@@ -459,7 +459,7 @@ Per-render overrides (apply to this invocation only; config untouched):
                     repeated renders stay stable; default reads prompt_id
                     (fallback session_id) from JSON on stdin
   --max-width=<n>   statusline style: truncate to n display columns
-                    (default: terminal width, 80 if undetectable)
+                    (default 80; detected terminal width when stdout is a TTY)
 
 Subcommands:
   --init            interactive setup: pick topics, style, patch shell rc
