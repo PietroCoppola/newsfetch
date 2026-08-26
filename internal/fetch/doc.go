@@ -4,8 +4,8 @@
 // # Source contract
 //
 // A Source is a stateless client for a single upstream provider (Hacker News
-// via Algolia in v1; Lobste.rs, RSS, and GitHub Trending are planned for later
-// milestones). Implementations must follow these rules:
+// via Algolia and Lobste.rs today; RSS and GitHub Trending are planned for
+// later milestones). Implementations must follow these rules:
 //
 //   - Constructors do no I/O. All network access happens inside Fetch.
 //   - Fetch honours the context's deadline and cancellation. Callers rely on
