@@ -52,6 +52,9 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	if width <= 0 {
 		width = defaults.TermWidth(defaults.BoxWidth)
 	}
+	// One clock reading for the whole invocation: the rendered age and any
+	// pin written below then agree.
+	now := time.Now().UTC()
 
 	if pin != "" {
 		if sPath, err := session.Path(); err == nil {
@@ -63,7 +66,7 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 			})
 			switch {
 			case err == nil:
-				fmt.Fprint(out, render.Statusline(fetch.Story{Title: e.Title, URL: e.URL}, width))
+				fmt.Fprint(out, render.Statusline(fetch.Story{Title: e.Title, URL: e.URL}, now, width))
 				if stale {
 					spawnRefresh()
 				}
@@ -84,7 +87,6 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
 	f, readErr := cache.Read(path)
 	if readErr != nil || len(f.Stories) == 0 {
 		spawnRefresh()
@@ -101,7 +103,7 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	if len(picked) == 0 {
 		return nil
 	}
-	fmt.Fprint(out, render.Statusline(picked[0], width))
+	fmt.Fprint(out, render.Statusline(picked[0], now, width))
 	recordHistory(picked, now, errOut)
 	if !f.IsFresh(cfg.CacheTTL, now) {
 		spawnRefresh()
