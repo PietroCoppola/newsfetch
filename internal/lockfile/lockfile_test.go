@@ -1,6 +1,7 @@
 package lockfile_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,7 +13,9 @@ import (
 // held by someone else (a stopped process, hung disk I/O) must produce an
 // error after the timeout, never an indefinite block — the render path
 // runs on every terminal open and a hung shell is worse than one lost
-// history entry.
+// history entry. The error must also identify itself as contention:
+// callers that skip work when a lock is held need to tell that apart from
+// a lock they could not open at all.
 func TestAcquire_GivesUpWhenHeld(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seen.lock")
 	held, err := lockfile.Acquire(path, time.Second)
@@ -20,9 +23,13 @@ func TestAcquire_GivesUpWhenHeld(t *testing.T) {
 		t.Fatalf("first acquire: %v", err)
 	}
 	defer held.Close()
-	if second, err := lockfile.Acquire(path, 30*time.Millisecond); err == nil {
+	second, err := lockfile.Acquire(path, 30*time.Millisecond)
+	if err == nil {
 		second.Close()
 		t.Fatal("expected timeout error while lock is held elsewhere")
+	}
+	if !errors.Is(err, lockfile.ErrHeld) {
+		t.Errorf("Acquire error = %v, want one matching ErrHeld", err)
 	}
 }
 

@@ -197,6 +197,40 @@ func TestRunRefresh_SkipsWhenAnotherRefreshHoldsLock(t *testing.T) {
 	}
 }
 
+// TestRunRefresh_UnopenableLockIsAFailureNotASkip separates contention
+// from fault: the single-flight guard must stay quiet only when another
+// refresh holds the lock. A lock that cannot be opened at all — here an
+// unwritable cache dir — has to propagate, or refresh exits 0 forever and
+// nothing ever reaches refreshlog to say why the cache went stale.
+func TestRunRefresh_UnopenableLockIsAFailureNotASkip(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions do not deny access")
+	}
+	isolateXDG(t)
+	path, err := cache.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// r-x: the dir exists (so MkdirAll succeeds) but refresh.lock cannot be
+	// created in it.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	err = runRefresh()
+	if err == nil {
+		t.Fatal("runRefresh() = nil for an unopenable lock, want an error reaching refreshlog")
+	}
+	if !strings.Contains(err.Error(), "refresh lock") {
+		t.Errorf("error = %v, want it wrapped as a refresh lock failure", err)
+	}
+}
+
 func swapHNSource(t *testing.T, url string) {
 	t.Helper()
 	original := newSource

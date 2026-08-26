@@ -484,6 +484,11 @@ Subcommands:
 // 0 — exactly one attempt, no wait) makes the losers return quietly instead
 // of hammering the same sources for the same answer. The lock is held for
 // the whole refresh and released when the process exits.
+//
+// Only contention is quiet. A lock that cannot be opened or flocked at all
+// (unwritable cache dir, a filesystem without flock) is a real fault and
+// propagates, so it reaches refreshlog instead of exiting 0 forever with
+// nothing to show for it.
 func runRefresh() error {
 	path, err := cache.Path()
 	if err != nil {
@@ -495,9 +500,12 @@ func runRefresh() error {
 	}
 	lock, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), 0)
 	if err != nil {
-		// Held: another refresh is in flight and will warm the cache for
-		// everyone. This one's job is done.
-		return nil
+		if errors.Is(err, lockfile.ErrHeld) {
+			// Another refresh is in flight and will warm the cache for
+			// everyone. This one's job is done.
+			return nil
+		}
+		return fmt.Errorf("refresh lock: %w", err)
 	}
 	defer lock.Close() // close releases the flock
 
