@@ -242,6 +242,19 @@ func TestValidate_StatuslineStyleIsValid(t *testing.T) {
 	}
 }
 
+func TestValidate_StatuslineStyleFromConfigWarnsAndFallsBack(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Style = "statusline"
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{Style: "config"}, &buf)
+	if got.Style != "boxed" {
+		t.Errorf("Style = %q, want boxed", got.Style)
+	}
+	if !strings.Contains(buf.String(), "flag-only") {
+		t.Errorf("expected flag-only warning, got %q", buf.String())
+	}
+}
+
 func TestValidate_BadStyleFromFlag(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Style = "wat"
