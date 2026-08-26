@@ -47,7 +47,7 @@ const minCacheTTL = 5 * time.Minute
 func Validate(c Config, src FieldSources, w io.Writer) Config {
 	minMins := int(minCacheTTL / time.Minute)
 	switch c.Style {
-	case "boxed", "minimal", "json":
+	case "boxed", "minimal", "json", "statusline":
 	default:
 		bad := c.Style
 		c.Style = Defaults().Style

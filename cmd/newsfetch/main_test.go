@@ -103,6 +103,40 @@ func algoliaStub() *httptest.Server {
 	}))
 }
 
+func TestParseAndLoad_PinAndMaxWidthFlags(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config file → defaults
+	var buf bytes.Buffer
+	cfg, cli, exit, err := parseAndLoad(
+		[]string{"--style=statusline", "--pin=prompt-abc", "--max-width=60"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit != exitRun {
+		t.Fatalf("exit = %v, want exitRun", exit)
+	}
+	if cfg.Style != "statusline" {
+		t.Errorf("Style = %q, want statusline", cfg.Style)
+	}
+	if cli.pin != "prompt-abc" {
+		t.Errorf("pin = %q, want prompt-abc", cli.pin)
+	}
+	if cli.maxWidth != 60 {
+		t.Errorf("maxWidth = %d, want 60", cli.maxWidth)
+	}
+}
+
+func TestParseAndLoad_NegativeMaxWidthMeansAuto(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var buf bytes.Buffer
+	_, cli, _, err := parseAndLoad([]string{"--max-width=-5"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cli.maxWidth != 0 {
+		t.Errorf("maxWidth = %d, want 0 (auto)", cli.maxWidth)
+	}
+}
+
 func TestFallbackMessage_SingleSourceNamed(t *testing.T) {
 	got := fallbackMessage([]string{"lobsters"})
 	if !strings.Contains(got, "lobsters") {

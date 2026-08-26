@@ -205,7 +205,7 @@ func promptYesNo(in *os.File, out io.Writer) func(string) bool {
 // reads the cache, and prints a rendered story (or a fallback). Callers
 // pass an rng so tests can seed determinism.
 func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
-	cfg, earlyExit, err := parseAndLoad(args, errOut)
+	cfg, _, earlyExit, err := parseAndLoad(args, errOut)
 	if err != nil {
 		return err
 	}
@@ -356,11 +356,20 @@ const (
 	exitHelp
 )
 
+// cliOverrides carries CLI-only flags that parseAndLoad returns alongside
+// Config; see the pin/maxWidth flag declarations below for why they don't
+// live on Config itself.
+type cliOverrides struct {
+	pin      string
+	maxWidth int
+}
+
 // parseAndLoad handles the flag parse, config.Load, and config.Validate
-// steps and returns the merged Config. On parse error, it emits a warning
-// to errOut and returns Defaults(). On --version or --help, returns an
-// early-exit marker so the caller can handle those without continuing.
-func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind, error) {
+// steps and returns the merged Config plus any CLI-only overrides. On parse
+// error, it emits a warning to errOut and returns Defaults(). On --version
+// or --help, returns an early-exit marker so the caller can handle those
+// without continuing.
+func parseAndLoad(args []string, errOut io.Writer) (config.Config, cliOverrides, earlyExitKind, error) {
 	fs := flag.NewFlagSet("newsfetch", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	// Suppress stdlib's default usage dump on -h and bad flags; we print
@@ -374,24 +383,29 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 	// (clamped + warned by the validator). flag.IntVar with default -1
 	// gives the same effect with a real integer.
 	countFlag := fs.Int("count", -1, "stories to render this invocation: 1..4 (overrides config)")
+	// pin and maxWidth ride alongside Config rather than inside it: they are
+	// per-invocation statusline parameters with no config-file counterpart,
+	// so threading them through config.Validate would only add noise.
+	pinFlag := fs.String("pin", "", "statusline style: pin story selection to this key (default: read stdin JSON)")
+	maxWidthFlag := fs.Int("max-width", 0, "statusline style: max display columns, 0 = auto-detect")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	showHelp := fs.Bool("help", false, "print usage and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return config.Defaults(), exitHelp, nil
+			return config.Defaults(), cliOverrides{}, exitHelp, nil
 		}
-		return config.Defaults(), exitRun, err
+		return config.Defaults(), cliOverrides{}, exitRun, err
 	}
 	if *showVersion {
-		return config.Defaults(), exitVersion, nil
+		return config.Defaults(), cliOverrides{}, exitVersion, nil
 	}
 	if *showHelp {
-		return config.Defaults(), exitHelp, nil
+		return config.Defaults(), cliOverrides{}, exitHelp, nil
 	}
 
 	cfgPath, err := config.Path()
 	if err != nil {
-		return config.Defaults(), exitRun, nil
+		return config.Defaults(), cliOverrides{}, exitRun, nil
 	}
 	cfg, loadErr := config.Load(cfgPath)
 	var src config.FieldSources
@@ -418,8 +432,12 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 		cfg.Count = *countFlag
 		src.Count = "flag"
 	}
+	cli := cliOverrides{pin: *pinFlag, maxWidth: *maxWidthFlag}
+	if cli.maxWidth < 0 {
+		cli.maxWidth = 0
+	}
 	cfg = config.Validate(cfg, src, errOut)
-	return cfg, exitRun, nil
+	return cfg, cli, exitRun, nil
 }
 
 func printHelp(out io.Writer) {

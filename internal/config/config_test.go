@@ -229,6 +229,19 @@ func TestValidate_BadStyleFromConfig(t *testing.T) {
 	}
 }
 
+func TestValidate_StatuslineStyleIsValid(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Style = "statusline"
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{Style: "flag"}, &buf)
+	if got.Style != "statusline" {
+		t.Errorf("Style = %q, want statusline", got.Style)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unexpected warning: %s", buf.String())
+	}
+}
+
 func TestValidate_BadStyleFromFlag(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Style = "wat"
