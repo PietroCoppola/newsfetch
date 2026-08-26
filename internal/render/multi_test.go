@@ -1,6 +1,7 @@
 package render_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,29 @@ func mustMulti(t *testing.T, stories []fetch.Story, now time.Time, width int, op
 		t.Fatalf("Multi: %v", err)
 	}
 	return got
+}
+
+// TestMulti_NarrowWidthDoesNotPanic covers widths below the structural
+// minimum, where the multi renderers used to build negative-count
+// strings.Repeat runs and panic. Multi clamps like Boxed instead.
+func TestMulti_NarrowWidthDoesNotPanic(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	stories := fixtureStories(now)
+	for _, width := range []int{0, 1, 3, 9} {
+		for _, boxed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("width=%d/boxed=%t", width, boxed), func(t *testing.T) {
+				got, err := render.Multi(stories, now, width, render.MultiOptions{
+					Marker: render.TickerBranch, Boxed: boxed,
+				})
+				if err != nil {
+					t.Fatalf("Multi(width=%d, boxed=%t) error: %v", width, boxed, err)
+				}
+				if got == "" {
+					t.Errorf("Multi(width=%d, boxed=%t) = empty, want a render", width, boxed)
+				}
+			})
+		}
+	}
 }
 
 func TestMulti_ErrorsOnEmpty(t *testing.T) {

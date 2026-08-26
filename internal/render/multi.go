@@ -64,9 +64,14 @@ type MultiOptions struct {
 // Display-column-aware truncation (CJK/emoji width) is a polish item
 // targeted for a later width sweep; this function uses the same
 // rune-count rule as [Boxed].
+//
+// A width below the structural minimum is clamped like [Boxed] clamps it.
 func Multi(stories []fetch.Story, now time.Time, width int, opts MultiOptions) (string, error) {
 	if len(stories) == 0 {
 		return "", errors.New("render multi-story: no stories")
+	}
+	if width < minWidth {
+		width = minWidth
 	}
 	if len(stories) == 1 {
 		return Boxed(stories[0], now, width), nil
