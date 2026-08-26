@@ -148,12 +148,19 @@ echo '{"topics": ["rust"], "style": "boxed", "sources": ["hackernews"], "count":
 ### Claude Code statusline
 
 `--style=statusline` emits one line: the story title, OSC 8-hyperlinked to
-the story URL and underlined, truncated to `--max-width` display columns
-(default 80; detected terminal width when stdout is a TTY, which a
-statusline invocation never is).
-No box, no host/age/author. Piping the Claude Code statusline JSON into it
-pins the story per user message (`prompt_id`), so the headline doesn't
-flicker as the statusline re-renders — it advances when you send a message.
+the story URL and underlined, then a dim `· host · age · by author` tail —
+the `by` segment only when the story has an author. The tail is never
+linked or underlined. No box.
+
+The line truncates to `--max-width` display columns (default 80; detected
+terminal width when stdout is a TTY, which a statusline invocation never
+is). The tail is charged against the budget first and the title takes what
+is left, so a squeeze shrinks the headline and keeps the metadata; at
+widths too narrow for both, the tail drops.
+
+Piping the Claude Code statusline JSON into it pins the story per user
+message (`prompt_id`), so the headline doesn't flicker as the statusline
+re-renders — it advances when you send a message.
 
 Add it to a statusline script:
 
