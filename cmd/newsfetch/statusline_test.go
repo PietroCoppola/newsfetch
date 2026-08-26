@@ -132,9 +132,7 @@ func TestStatusline_NoPinStillRenders(t *testing.T) {
 }
 
 func TestStatusline_CacheMissRendersNothing(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateXDG(t)
 	restore := spawnRefresh
 	spawned := false
 	spawnRefresh = func() { spawned = true }
