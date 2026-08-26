@@ -17,6 +17,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/cache"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 )
 
 // isolateXDG points every XDG root (and HOME, which the XDG fallbacks
@@ -160,6 +161,39 @@ func TestFallbackMessage_NoSourcesGeneric(t *testing.T) {
 	got := fallbackMessage(nil)
 	if got != defaults.FallbackMessage {
 		t.Errorf("nil-sources fallback = %q, want default", got)
+	}
+}
+
+// TestRunRefresh_SkipsWhenAnotherRefreshHoldsLock covers the single-flight
+// guard: a cold statusline render and a multi-tab terminal restore can each
+// spawn --__refresh, and only the first should reach the network. The
+// stand-in factory both fails the test and refuses to build a source, so a
+// regression cannot leak a real HN request out of the test suite.
+func TestRunRefresh_SkipsWhenAnotherRefreshHoldsLock(t *testing.T) {
+	isolateXDG(t)
+	path, err := cache.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), time.Second)
+	if err != nil {
+		t.Fatalf("test could not take the refresh lock: %v", err)
+	}
+	t.Cleanup(func() { held.Close() })
+
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		t.Errorf("runRefresh built source %q while another refresh held the lock", name)
+		return nil, fmt.Errorf("source %q must not be built", name)
+	}
+	t.Cleanup(func() { newSource = original })
+
+	if err := runRefresh(); err != nil {
+		t.Errorf("runRefresh() = %v, want nil (another refresh is already in flight)", err)
 	}
 }
 

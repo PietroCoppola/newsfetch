@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/history"
+	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/rank"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
@@ -476,11 +478,29 @@ Subcommands:
 `)
 }
 
+// runRefresh fetches every configured source and rewrites the cache. It is
+// single-flight: a cold statusline render and a multi-tab terminal restore
+// can each spawn one, and a try-acquire on a sidecar refresh.lock (timeout
+// 0 — exactly one attempt, no wait) makes the losers return quietly instead
+// of hammering the same sources for the same answer. The lock is held for
+// the whole refresh and released when the process exits.
 func runRefresh() error {
 	path, err := cache.Path()
 	if err != nil {
 		return err
 	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	lock, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), 0)
+	if err != nil {
+		// Held: another refresh is in flight and will warm the cache for
+		// everyone. This one's job is done.
+		return nil
+	}
+	defer lock.Close() // close releases the flock
+
 	cfg := config.Defaults()
 	if cfgPath, err := config.Path(); err == nil {
 		if loaded, err := config.Load(cfgPath); err == nil {
