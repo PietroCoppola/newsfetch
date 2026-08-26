@@ -13,9 +13,11 @@ import (
 // topicOptions defines the topic multi-select choices used by both wizards
 // (one shared function keeps --init and --settings menus identical; adding
 // or removing a topic is a one-line change). All option tables are
-// functions, not package-level slices: nothing is constructed at package
-// init, which the hot render path pays for despite never running a
-// wizard, and no package-level mutable state is left exposed.
+// functions, not package-level slices: no package-level mutable state is
+// left exposed (the two wizards no longer share option structs), and
+// package init does no avoidable work — though the dominant init cost on
+// the render path is the huh/bubbletea stack itself, which links into the
+// one binary regardless; see spec §12's honesty note.
 func topicOptions() []huh.Option[string] {
 	return []huh.Option[string]{
 		huh.NewOption("AI / LLMs", "ai"),

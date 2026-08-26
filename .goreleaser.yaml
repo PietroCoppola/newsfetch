@@ -1,9 +1,9 @@
 # GoReleaser config for newsfetch.
 #
 # Cuts a release on every `v*` tag pushed to GitHub. Cross-compiles for
-# darwin/amd64, darwin/arm64, linux/amd64, linux/arm64, plus windows/amd64
-# as best-effort (we don't officially support Windows, but cross-compilation
-# is free and a curious user can grab the binary).
+# darwin/amd64, darwin/arm64, linux/amd64, linux/arm64. Windows is not
+# built: the binary depends on Unix-only syscalls (Setpgid for the
+# detached refresh, flock for the history lock) — see the builds block.
 #
 # Run `goreleaser check` locally to validate the config; `goreleaser release
 # --snapshot --clean` builds the artifacts without publishing for smoke
