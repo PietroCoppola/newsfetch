@@ -48,15 +48,21 @@ func TestSelectN_DiversityPrefersDifferentHost(t *testing.T) {
 		{ID: "b", URL: "https://same.com/2", Points: 900, CreatedAt: now.Add(-time.Hour)},
 		{ID: "c", URL: "https://different.com/1", Points: 800, CreatedAt: now.Add(-time.Hour)},
 	}
-	// Force deterministic hero by using PoolSize=1 (only top-scored survives
-	// the pool cut, so the stochastic pick is degenerate).
-	got := rank.SelectN(stories, 2, rank.Options{Now: now, PoolSize: 3}, rand.New(rand.NewSource(1)))
-	// Hero should be "a" almost surely (highest score, weighted pick within
-	// 3-story pool dominated by it). Slot 2 should prefer "c" over "b"
-	// despite "b" having a higher raw score, because of host penalty.
-	// We assert: if hero is a, slot 2 must be c.
-	if got[0].ID == "a" && got[1].ID != "c" {
-		t.Errorf("with hero=a, expected slot 2=c (host-diverse) but got %s", got[1].ID)
+	// Seed 2's first Float64 (≈0.167) lands inside "a"'s weight share
+	// (1000/2700 ≈ 0.370), making the stochastic hero deterministically
+	// "a". The Fatalf below is a precondition guard, not an assertion: if
+	// Score, the rng draw order, or these inputs ever change and the hero
+	// shifts, the test fails loudly instead of silently skipping its
+	// diversity assertion (which is what a plain `if hero == "a"` guard
+	// did before — with seed 1 the hero was "b" and nothing was asserted).
+	got := rank.SelectN(stories, 2, rank.Options{Now: now, PoolSize: 3}, rand.New(rand.NewSource(2)))
+	if got[0].ID != "a" {
+		t.Fatalf("precondition: hero = %s, want a — seed/scoring drifted, re-pin the seed", got[0].ID)
+	}
+	// Slot 2 must prefer "c" over "b" despite "b"'s higher raw score:
+	// b shares a's host (900 × 0.6 = 540) while c does not (800 × 1.0).
+	if got[1].ID != "c" {
+		t.Errorf("slot 2 = %s, want c (host-diverse over higher-scored same-host b)", got[1].ID)
 	}
 }
 
@@ -67,11 +73,15 @@ func TestSelectN_DiversityPrefersDifferentTags(t *testing.T) {
 		{ID: "b", URL: "https://y.com/1", Points: 950, Tags: []string{"rust"}, CreatedAt: now.Add(-time.Hour)},
 		{ID: "c", URL: "https://z.com/1", Points: 700, Tags: []string{"go"}, CreatedAt: now.Add(-time.Hour)},
 	}
-	got := rank.SelectN(stories, 2, rank.Options{Now: now, PoolSize: 3}, rand.New(rand.NewSource(1)))
-	// 950 * 0.4 (tag penalty) = 380; 700 * 1.0 = 700. So if hero is "a",
-	// slot 2 should be "c".
-	if got[0].ID == "a" && got[1].ID != "c" {
-		t.Errorf("with hero=a, expected slot 2=c (tag-diverse) but got %s", got[1].ID)
+	// Seed 2 pins the hero to "a" (same mechanics as the host test above);
+	// the Fatalf keeps a future drift loud rather than silently vacuous.
+	got := rank.SelectN(stories, 2, rank.Options{Now: now, PoolSize: 3}, rand.New(rand.NewSource(2)))
+	if got[0].ID != "a" {
+		t.Fatalf("precondition: hero = %s, want a — seed/scoring drifted, re-pin the seed", got[0].ID)
+	}
+	// 950 × 0.4 (tag penalty) = 380 for b; 700 × 1.0 = 700 for c.
+	if got[1].ID != "c" {
+		t.Errorf("slot 2 = %s, want c (tag-diverse over higher-scored same-tag b)", got[1].ID)
 	}
 }
 
@@ -88,9 +98,15 @@ func TestSelectN_DiversityFallsBackWhenAllPenalised(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
-	// Hero is stochastic but ticker order should follow remaining-score.
-	// All multipliers are the same so ordering by raw score is preserved
-	// among the non-hero stories.
+	// The hero is stochastic, but whoever it is, the two non-hero slots
+	// carry identical diversity multipliers (every story shares host and
+	// tag with every other), so their relative order must follow raw
+	// score — descending Points. This holds for any hero, so no seed
+	// pinning is needed.
+	if got[1].Points < got[2].Points {
+		t.Errorf("non-hero slots out of score order: got [%s(%d), %s(%d)], want descending Points",
+			got[1].ID, got[1].Points, got[2].ID, got[2].Points)
+	}
 }
 
 func TestSelectN_PanicsOnEmpty(t *testing.T) {
