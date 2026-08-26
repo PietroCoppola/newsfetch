@@ -41,3 +41,14 @@ func TestTermWidth_NonTTYFallsBack(t *testing.T) {
 		t.Errorf("TermWidth under non-TTY should echo fallback; got %d want 73", got)
 	}
 }
+
+// TestSources_ReturnsCopy pins the registry's immutability, matching
+// fetch.KnownSourceNames and render.KnownTickerMarkers: a caller mutating
+// the returned slice must not affect what later callers see.
+func TestSources_ReturnsCopy(t *testing.T) {
+	a := Sources()
+	a[0] = "mutated"
+	if b := Sources(); b[0] == "mutated" {
+		t.Error("Sources shares its backing array; want a fresh copy per call")
+	}
+}

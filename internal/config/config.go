@@ -55,7 +55,7 @@ func Defaults() Config {
 		Style:        defaults.Style,
 		CacheTTL:     defaults.CacheTTL,
 		MinPoints:    defaults.MinPoints,
-		Sources:      append([]string(nil), defaults.Sources...),
+		Sources:      defaults.Sources(),
 		Count:        defaults.Count,
 		TickerMarker: defaults.TickerMarker,
 		TickerBoxed:  defaults.TickerBoxed,

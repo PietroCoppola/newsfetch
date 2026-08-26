@@ -66,11 +66,15 @@ const (
 	TickerBoxed = false
 )
 
-// Sources is the default source list. M4 ships HN-only by default and
-// requires the user to opt into Lobste.rs by editing config.toml.
-// Reasoning: the mixed HN+Lobste.rs pool has differing score scales and
-// volumes; we want to dogfood it before changing the default.
-var Sources = []string{"hackernews"}
+// Sources returns the default source list as a fresh copy per call,
+// matching the fetch.KnownSourceNames registry convention (Go cannot
+// declare const slices). M4 ships HN-only by default and requires the
+// user to opt into Lobste.rs by editing config.toml. Reasoning: the
+// mixed HN+Lobste.rs pool has differing score scales and volumes; we
+// want to dogfood it before changing the default.
+func Sources() []string {
+	return []string{"hackernews"}
+}
 
 const (
 	// CacheTTL is the stale-while-revalidate window. Reads newer than this
