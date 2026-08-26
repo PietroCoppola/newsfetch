@@ -31,10 +31,13 @@ const (
 )
 
 // KnownTickerMarkers is the single source of truth for the supported
-// marker names. The config validator and the wizard both consume it, so
-// adding a marker means one new entry here plus a case in
+// marker names, returned as a fresh copy per call so no caller can
+// mutate the registry. The config validator and the wizard both consume
+// it, so adding a marker means one new entry here plus a case in
 // markerSymbol.
-var KnownTickerMarkers = []TickerMarker{TickerDot, TickerArrow, TickerBranch}
+func KnownTickerMarkers() []TickerMarker {
+	return []TickerMarker{TickerDot, TickerArrow, TickerBranch}
+}
 
 // MultiOptions configures a [Multi] render.
 type MultiOptions struct {

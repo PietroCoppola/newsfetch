@@ -106,14 +106,14 @@ func validateSources(flag string, names []string) error {
 	}
 	for _, n := range names {
 		if !knownSourceName(n) {
-			return fmt.Errorf("%s JSON: unknown source %q (valid: %v)", flag, n, fetch.KnownSourceNames)
+			return fmt.Errorf("%s JSON: unknown source %q (valid: %v)", flag, n, fetch.KnownSourceNames())
 		}
 	}
 	return nil
 }
 
 func knownSourceName(name string) bool {
-	for _, k := range fetch.KnownSourceNames {
+	for _, k := range fetch.KnownSourceNames() {
 		if k == name {
 			return true
 		}
@@ -134,13 +134,14 @@ func validateCount(flag string, n int) error {
 // validateTickerMarker rejects unknown marker names. The known set is
 // owned by render.KnownTickerMarkers — single source of truth.
 func validateTickerMarker(flag, name string) error {
-	for _, m := range render.KnownTickerMarkers {
+	markers := render.KnownTickerMarkers()
+	for _, m := range markers {
 		if string(m) == name {
 			return nil
 		}
 	}
-	known := make([]string, len(render.KnownTickerMarkers))
-	for i, m := range render.KnownTickerMarkers {
+	known := make([]string, len(markers))
+	for i, m := range markers {
 		known[i] = string(m)
 	}
 	return fmt.Errorf("%s JSON: unknown ticker_marker %q (valid: %v)", flag, name, known)

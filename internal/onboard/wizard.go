@@ -63,8 +63,9 @@ var tickerBoxedOptions = []huh.Option[bool]{
 // list in fetch.KnownSourceNames so a new source automatically shows up
 // in the --settings wizard without a second edit.
 func sourceOptions() []huh.Option[string] {
-	opts := make([]huh.Option[string], 0, len(fetch.KnownSourceNames))
-	for _, name := range fetch.KnownSourceNames {
+	names := fetch.KnownSourceNames()
+	opts := make([]huh.Option[string], 0, len(names))
+	for _, name := range names {
 		label := name
 		switch name {
 		case "hackernews":

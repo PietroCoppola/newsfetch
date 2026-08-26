@@ -147,3 +147,14 @@ func TestJSONMulti_EmitsArray(t *testing.T) {
 		t.Errorf("JSONMulti missing last story; got: %s", got)
 	}
 }
+
+// TestKnownTickerMarkers_ReturnsCopy pins the registry's immutability: a
+// caller mutating the returned slice must not affect what later callers
+// see (the validator and the wizards all consume this list).
+func TestKnownTickerMarkers_ReturnsCopy(t *testing.T) {
+	a := render.KnownTickerMarkers()
+	a[0] = "mutated"
+	if b := render.KnownTickerMarkers(); b[0] == "mutated" {
+		t.Error("KnownTickerMarkers shares its backing array; want a fresh copy per call")
+	}
+}

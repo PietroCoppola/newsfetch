@@ -120,7 +120,7 @@ func clampCount(n int) int {
 }
 
 func knownTickerMarker(name string) bool {
-	for _, m := range render.KnownTickerMarkers {
+	for _, m := range render.KnownTickerMarkers() {
 		if string(m) == name {
 			return true
 		}
@@ -167,7 +167,7 @@ func splitSources(names []string) (valid, dropped []string) {
 }
 
 func knownSource(name string) bool {
-	for _, k := range fetch.KnownSourceNames {
+	for _, k := range fetch.KnownSourceNames() {
 		if k == name {
 			return true
 		}
