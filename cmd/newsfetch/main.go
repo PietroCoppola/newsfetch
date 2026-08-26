@@ -379,7 +379,7 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, cliOverrides,
 	// Suppress stdlib's default usage dump on -h and bad flags; we print
 	// printHelp from exitHelp and a single-line error from main.
 	fs.Usage = func() {}
-	styleFlag := fs.String("style", "", "display mode: boxed | minimal | json")
+	styleFlag := fs.String("style", "", "display mode: boxed | minimal | json | statusline")
 	topics := &topicsFlag{}
 	fs.Var(topics, "topics", "comma-separated topic list (explicit empty defeats config)")
 	// countFlag is sentinel-zero so we can distinguish "user didn't pass
@@ -450,9 +450,14 @@ func printHelp(out io.Writer) {
 Render one piece of tech news. Run without flags for the default boxed panel.
 
 Per-render overrides (apply to this invocation only; config untouched):
-  --style=<mode>    display mode for this render: boxed (default) | minimal | json
+  --style=<mode>    display mode for this render: boxed (default) | minimal | json | statusline
   --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
   --count=<n>       number of stories this render: 1..4 (default 1)
+  --pin=<key>       statusline style: pin story selection to this key so
+                    repeated renders stay stable; default reads prompt_id
+                    (fallback session_id) from JSON on stdin
+  --max-width=<n>   statusline style: truncate to n display columns
+                    (default: terminal width, 80 if undetectable)
 
 Subcommands:
   --init            interactive setup: pick topics, style, patch shell rc
