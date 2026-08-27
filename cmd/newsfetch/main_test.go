@@ -17,6 +17,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/cache"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 )
 
 // isolateXDG points every XDG root (and HOME, which the XDG fallbacks
@@ -103,6 +104,40 @@ func algoliaStub() *httptest.Server {
 	}))
 }
 
+func TestParseAndLoad_PinAndMaxWidthFlags(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config file → defaults
+	var buf bytes.Buffer
+	cfg, cli, exit, err := parseAndLoad(
+		[]string{"--style=statusline", "--pin=prompt-abc", "--max-width=60"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit != exitRun {
+		t.Fatalf("exit = %v, want exitRun", exit)
+	}
+	if cfg.Style != "statusline" {
+		t.Errorf("Style = %q, want statusline", cfg.Style)
+	}
+	if cli.pin != "prompt-abc" {
+		t.Errorf("pin = %q, want prompt-abc", cli.pin)
+	}
+	if cli.maxWidth != 60 {
+		t.Errorf("maxWidth = %d, want 60", cli.maxWidth)
+	}
+}
+
+func TestParseAndLoad_NegativeMaxWidthMeansAuto(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var buf bytes.Buffer
+	_, cli, _, err := parseAndLoad([]string{"--max-width=-5"}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cli.maxWidth != 0 {
+		t.Errorf("maxWidth = %d, want 0 (auto)", cli.maxWidth)
+	}
+}
+
 func TestFallbackMessage_SingleSourceNamed(t *testing.T) {
 	got := fallbackMessage([]string{"lobsters"})
 	if !strings.Contains(got, "lobsters") {
@@ -126,6 +161,83 @@ func TestFallbackMessage_NoSourcesGeneric(t *testing.T) {
 	got := fallbackMessage(nil)
 	if got != defaults.FallbackMessage {
 		t.Errorf("nil-sources fallback = %q, want default", got)
+	}
+}
+
+// TestRunRefresh_SkipsWhenAnotherRefreshHoldsLock covers the single-flight
+// guard: a cold statusline render and a multi-tab terminal restore can each
+// spawn --__refresh, and only the first should reach the network. The
+// stand-in factory both fails the test and refuses to build a source, so a
+// regression cannot leak a real HN request out of the test suite.
+func TestRunRefresh_SkipsWhenAnotherRefreshHoldsLock(t *testing.T) {
+	isolateXDG(t)
+	path, err := cache.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), time.Second)
+	if err != nil {
+		t.Fatalf("test could not take the refresh lock: %v", err)
+	}
+	t.Cleanup(func() { held.Close() })
+
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		t.Errorf("runRefresh built source %q while another refresh held the lock", name)
+		return nil, fmt.Errorf("source %q must not be built", name)
+	}
+	t.Cleanup(func() { newSource = original })
+
+	if err := runRefresh(); err != nil {
+		t.Errorf("runRefresh() = %v, want nil (another refresh is already in flight)", err)
+	}
+}
+
+// TestRunRefresh_UnopenableLockIsAFailureNotASkip separates contention
+// from fault: the single-flight guard must stay quiet only when another
+// refresh holds the lock. A lock that cannot be opened at all — here an
+// unwritable cache dir — has to propagate, or refresh exits 0 forever and
+// nothing ever reaches refreshlog to say why the cache went stale.
+func TestRunRefresh_UnopenableLockIsAFailureNotASkip(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions do not deny access")
+	}
+	isolateXDG(t)
+	path, err := cache.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// r-x: the dir exists (so MkdirAll succeeds) but refresh.lock cannot be
+	// created in it.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	// Belt and braces: on a host where chmod does not deny (a
+	// permission-ignoring mount, CAP_DAC_OVERRIDE), the lock would open and
+	// the refresh would run — the suite must never reach real HN.
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		t.Error("source constructed — lock failure should abort before any fetch")
+		return nil, fmt.Errorf("source %q must not be built", name)
+	}
+	t.Cleanup(func() { newSource = original })
+
+	err = runRefresh()
+	if err == nil {
+		t.Fatal("runRefresh() = nil for an unopenable lock, want an error reaching refreshlog")
+	}
+	if !strings.Contains(err.Error(), "refresh lock") {
+		t.Errorf("error = %v, want it wrapped as a refresh lock failure", err)
 	}
 }
 

@@ -64,9 +64,14 @@ type MultiOptions struct {
 // Display-column-aware truncation (CJK/emoji width) is a polish item
 // targeted for a later width sweep; this function uses the same
 // rune-count rule as [Boxed].
+//
+// A width below the structural minimum is clamped like [Boxed] clamps it.
 func Multi(stories []fetch.Story, now time.Time, width int, opts MultiOptions) (string, error) {
 	if len(stories) == 0 {
 		return "", errors.New("render multi-story: no stories")
+	}
+	if width < minWidth {
+		width = minWidth
 	}
 	if len(stories) == 1 {
 		return Boxed(stories[0], now, width), nil
@@ -87,9 +92,13 @@ func renderMultiPlain(stories []fetch.Story, now time.Time, width int, marker Ti
 	tickers := stories[1:]
 	for i, s := range tickers {
 		mk := markerSymbol(marker, i, len(tickers))
+		// The floor is 1, not minWidth: raising a squeezed budget back to
+		// minWidth would print ticker rows wider than the hero box they
+		// hang off. Multi's clamp keeps the real budget at 5 or more, and
+		// truncate copes with anything smaller.
 		budget := width - 2 - utf8.RuneCountInString(mk)
-		if budget < minWidth {
-			budget = minWidth
+		if budget < 1 {
+			budget = 1
 		}
 		b.WriteString("  " + mk + tickerBody(s, now, budget) + "\n")
 	}

@@ -21,8 +21,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
+
+	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 )
 
 // SchemaVersion identifies the on-disk layout. Bump when Entry or File gains
@@ -113,7 +114,7 @@ func Append(path string, entries []Entry) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create history dir: %w", err)
 	}
-	lock, err := acquireLock(filepath.Join(dir, "seen.lock"), lockTimeout)
+	lock, err := lockfile.Acquire(filepath.Join(dir, "seen.lock"), time.Second)
 	if err != nil {
 		return err
 	}
@@ -155,48 +156,6 @@ func Append(path string, entries []Entry) error {
 		return fmt.Errorf("rename temp history: %w", err)
 	}
 	return nil
-}
-
-// lockTimeout bounds how long Append waits for the sidecar lock. The
-// critical section is ~1ms, so even a terminal-restore burst of
-// contenders clears in well under this; a holder stuck longer (stopped
-// process, hung disk I/O) forfeits this render's history entry instead of
-// hanging the terminal open — losing one entry matters less than the
-// user's shell prompt appearing.
-const lockTimeout = time.Second
-
-// acquireLock takes an exclusive advisory lock on path, waiting at most
-// timeout for a holder to release it. Two flock realities shape the loop:
-// a blocking LOCK_EX can return EINTR when a signal lands (Go's
-// async-preemption SIGURG makes that routine, which is why cmd/go's
-// filelock retries it), so the non-blocking form is polled instead; and
-// the kernel drops the lock when the file closes — crashed holders
-// included — so callers release by closing the returned file and no
-// stale-lock recovery exists.
-func acquireLock(path string, timeout time.Duration) (*os.File, error) {
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("open history lock: %w", err)
-	}
-	deadline := time.Now().Add(timeout)
-	for {
-		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		switch {
-		case err == nil:
-			return lock, nil
-		case errors.Is(err, syscall.EINTR):
-			// Interrupted before the attempt resolved; try again now.
-		case errors.Is(err, syscall.EWOULDBLOCK):
-			if time.Now().After(deadline) {
-				lock.Close()
-				return nil, fmt.Errorf("lock history: held elsewhere for over %s", timeout)
-			}
-			time.Sleep(2 * time.Millisecond)
-		default:
-			lock.Close()
-			return nil, fmt.Errorf("lock history: %w", err)
-		}
-	}
 }
 
 // HashSet returns the entry hashes as a set for O(1) pre-filter lookups.

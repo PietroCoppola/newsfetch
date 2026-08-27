@@ -48,6 +48,19 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 	minMins := int(minCacheTTL / time.Minute)
 	switch c.Style {
 	case "boxed", "minimal", "json":
+	case "statusline":
+		// Valid from the flag only: statusline is an invocation mode for
+		// the Claude Code statusline script, not a daily-driver default.
+		// Persisted in config it would make every terminal open render a
+		// bare linked line — or nothing at all on a cold cache, since the
+		// statusline path never blocks on the network. The settings
+		// surfaces deliberately do not offer it.
+		if src.Style != "flag" {
+			bad := c.Style
+			c.Style = Defaults().Style
+			fmt.Fprintf(w, "newsfetch: style %q is flag-only (use --style=statusline), using %q\n", bad, c.Style)
+			return silentlyCorrect(c)
+		}
 	default:
 		bad := c.Style
 		c.Style = Defaults().Style

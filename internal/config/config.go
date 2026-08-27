@@ -21,7 +21,7 @@ import (
 // values from the TOML file and any applicable CLI overrides.
 type Config struct {
 	Topics    []string      // nil → no topic filter
-	Style     string        // "boxed" | "minimal" | "json"
+	Style     string        // "boxed" | "minimal" | "json" | "statusline" (statusline is flag-only; Validate rejects it from config)
 	CacheTTL  time.Duration // derived from cache_ttl_minutes
 	MinPoints int
 	// Sources lists which Source implementations to fetch from, by name.

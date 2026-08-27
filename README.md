@@ -63,9 +63,14 @@ bash, or fish) so a story renders on each new terminal.
 ```
 Per-render overrides (apply to this invocation only; config is
 untouched):
-  --style=<mode>    display mode for this render: boxed (default) | minimal | json
+  --style=<mode>    display mode for this render: boxed (default) | minimal | json | statusline
   --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
   --count=<n>       number of stories this render: 1..4 (default 1)
+  --pin=<key>       statusline style: pin story selection to this key so
+                    repeated renders stay stable; default reads prompt_id
+                    (fallback session_id) from JSON on stdin
+  --max-width=<n>   statusline style: truncate to n display columns
+                    (default 80; detected terminal width when stdout is a TTY)
 
 Subcommands:
   --init            interactive setup
@@ -139,6 +144,36 @@ scripted edits doesn't silently lose ticker tuning).
 echo '{"topics": ["rust"], "style": "minimal", "sources": ["hackernews"], "count": 1}' | newsfetch --settings
 echo '{"topics": ["rust"], "style": "boxed", "sources": ["hackernews"], "count": 3, "ticker_marker": "branch", "ticker_boxed": false}' | newsfetch --settings
 ```
+
+### Claude Code statusline
+
+`--style=statusline` emits one line: the story title, OSC 8-hyperlinked to
+the story URL and underlined, then a dim `· host · age · by author` tail —
+the `by` segment only when the story has an author. The tail is never
+linked or underlined. No box.
+
+The line truncates to `--max-width` display columns (default 80; detected
+terminal width when stdout is a TTY, which a statusline invocation never
+is). The tail is charged against the budget first and the title takes what
+is left, so a squeeze shrinks the headline and keeps the metadata; at
+widths too narrow for both, the tail drops.
+
+Piping the Claude Code statusline JSON into it pins the story per user
+message (`prompt_id`), so the headline doesn't flicker as the statusline
+re-renders — it advances when you send a message.
+
+Add it to a statusline script:
+
+```
+input=$(cat)
+news=$(printf '%s' "$input" | newsfetch --style=statusline 2>/dev/null)
+[ -n "$news" ] && printf '%s\n' "$news"
+```
+
+Cache miss renders nothing (never blocks on the network) and warms the
+cache for the next render. Statusline renders share the regular history
+dedup, so your terminal-open story and your statusline story don't repeat
+each other within the dedup window.
 
 ## Status
 

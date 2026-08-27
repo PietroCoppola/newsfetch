@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/history"
+	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/rank"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
@@ -41,6 +43,10 @@ const (
 // t.Cleanup(func() { newSource = original }) to avoid leaking the swap
 // into other tests. config.Validate guarantees only known names reach
 // this function in production, so the default branch is defence in depth.
+//
+// Sanctioned exception to the no-global-mutable-state convention
+// (CLAUDE.md, ruled 2026-08-26): package-main test seams, swapped only in
+// tests, restored via t.Cleanup.
 var newSource = func(name string) (fetch.Source, error) {
 	switch name {
 	case "hackernews":
@@ -205,7 +211,7 @@ func promptYesNo(in *os.File, out io.Writer) func(string) bool {
 // reads the cache, and prints a rendered story (or a fallback). Callers
 // pass an rng so tests can seed determinism.
 func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
-	cfg, earlyExit, err := parseAndLoad(args, errOut)
+	cfg, cli, earlyExit, err := parseAndLoad(args, errOut)
 	if err != nil {
 		return err
 	}
@@ -216,6 +222,10 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	case exitHelp:
 		printHelp(out)
 		return nil
+	}
+
+	if cfg.Style == "statusline" {
+		return runStatusline(out, errOut, cfg, cli, rng)
 	}
 
 	path, err := cache.Path()
@@ -356,17 +366,26 @@ const (
 	exitHelp
 )
 
+// cliOverrides carries CLI-only flags that parseAndLoad returns alongside
+// Config; see the pin/maxWidth flag declarations below for why they don't
+// live on Config itself.
+type cliOverrides struct {
+	pin      string
+	maxWidth int
+}
+
 // parseAndLoad handles the flag parse, config.Load, and config.Validate
-// steps and returns the merged Config. On parse error, it emits a warning
-// to errOut and returns Defaults(). On --version or --help, returns an
-// early-exit marker so the caller can handle those without continuing.
-func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind, error) {
+// steps and returns the merged Config plus any CLI-only overrides. On parse
+// error, it emits a warning to errOut and returns Defaults(). On --version
+// or --help, returns an early-exit marker so the caller can handle those
+// without continuing.
+func parseAndLoad(args []string, errOut io.Writer) (config.Config, cliOverrides, earlyExitKind, error) {
 	fs := flag.NewFlagSet("newsfetch", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	// Suppress stdlib's default usage dump on -h and bad flags; we print
 	// printHelp from exitHelp and a single-line error from main.
 	fs.Usage = func() {}
-	styleFlag := fs.String("style", "", "display mode: boxed | minimal | json")
+	styleFlag := fs.String("style", "", "display mode: boxed | minimal | json | statusline")
 	topics := &topicsFlag{}
 	fs.Var(topics, "topics", "comma-separated topic list (explicit empty defeats config)")
 	// countFlag is sentinel-zero so we can distinguish "user didn't pass
@@ -374,24 +393,29 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 	// (clamped + warned by the validator). flag.IntVar with default -1
 	// gives the same effect with a real integer.
 	countFlag := fs.Int("count", -1, "stories to render this invocation: 1..4 (overrides config)")
+	// pin and maxWidth ride alongside Config rather than inside it: they are
+	// per-invocation statusline parameters with no config-file counterpart,
+	// so threading them through config.Validate would only add noise.
+	pinFlag := fs.String("pin", "", "statusline style: pin story selection to this key (default: read stdin JSON)")
+	maxWidthFlag := fs.Int("max-width", 0, "statusline style: max display columns, 0 = auto-detect")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	showHelp := fs.Bool("help", false, "print usage and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return config.Defaults(), exitHelp, nil
+			return config.Defaults(), cliOverrides{}, exitHelp, nil
 		}
-		return config.Defaults(), exitRun, err
+		return config.Defaults(), cliOverrides{}, exitRun, err
 	}
 	if *showVersion {
-		return config.Defaults(), exitVersion, nil
+		return config.Defaults(), cliOverrides{}, exitVersion, nil
 	}
 	if *showHelp {
-		return config.Defaults(), exitHelp, nil
+		return config.Defaults(), cliOverrides{}, exitHelp, nil
 	}
 
 	cfgPath, err := config.Path()
 	if err != nil {
-		return config.Defaults(), exitRun, nil
+		return config.Defaults(), cliOverrides{}, exitRun, nil
 	}
 	cfg, loadErr := config.Load(cfgPath)
 	var src config.FieldSources
@@ -418,8 +442,12 @@ func parseAndLoad(args []string, errOut io.Writer) (config.Config, earlyExitKind
 		cfg.Count = *countFlag
 		src.Count = "flag"
 	}
+	cli := cliOverrides{pin: *pinFlag, maxWidth: *maxWidthFlag}
+	if cli.maxWidth < 0 {
+		cli.maxWidth = 0
+	}
 	cfg = config.Validate(cfg, src, errOut)
-	return cfg, exitRun, nil
+	return cfg, cli, exitRun, nil
 }
 
 func printHelp(out io.Writer) {
@@ -428,9 +456,14 @@ func printHelp(out io.Writer) {
 Render one piece of tech news. Run without flags for the default boxed panel.
 
 Per-render overrides (apply to this invocation only; config untouched):
-  --style=<mode>    display mode for this render: boxed (default) | minimal | json
+  --style=<mode>    display mode for this render: boxed (default) | minimal | json | statusline
   --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
   --count=<n>       number of stories this render: 1..4 (default 1)
+  --pin=<key>       statusline style: pin story selection to this key so
+                    repeated renders stay stable; default reads prompt_id
+                    (fallback session_id) from JSON on stdin
+  --max-width=<n>   statusline style: truncate to n display columns
+                    (default 80; detected terminal width when stdout is a TTY)
 
 Subcommands:
   --init            interactive setup: pick topics, style, patch shell rc
@@ -449,11 +482,37 @@ Subcommands:
 `)
 }
 
+// runRefresh fetches every configured source and rewrites the cache. It is
+// single-flight: a cold statusline render and a multi-tab terminal restore
+// can each spawn one, and a try-acquire on a sidecar refresh.lock (timeout
+// 0 — exactly one attempt, no wait) makes the losers return quietly instead
+// of hammering the same sources for the same answer. The lock is held for
+// the whole refresh and released when the process exits.
+//
+// Only contention is quiet. A lock that cannot be opened or flocked at all
+// (unwritable cache dir, a filesystem without flock) is a real fault and
+// propagates, so it reaches refreshlog instead of exiting 0 forever with
+// nothing to show for it.
 func runRefresh() error {
 	path, err := cache.Path()
 	if err != nil {
 		return err
 	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	lock, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), 0)
+	if err != nil {
+		if errors.Is(err, lockfile.ErrHeld) {
+			// Another refresh is in flight and will warm the cache for
+			// everyone. This one's job is done.
+			return nil
+		}
+		return fmt.Errorf("refresh lock: %w", err)
+	}
+	defer lock.Close() // close releases the flock
+
 	cfg := config.Defaults()
 	if cfgPath, err := config.Path(); err == nil {
 		if loaded, err := config.Load(cfgPath); err == nil {
@@ -564,7 +623,14 @@ func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now t
 	return nil
 }
 
-func spawnRefresh() {
+// spawnRefresh launches the detached background refresh. Tests MAY swap
+// this to observe or suppress the spawn, but MUST restore via t.Cleanup —
+// same contract as newSource above.
+//
+// Sanctioned exception to the no-global-mutable-state convention
+// (CLAUDE.md, ruled 2026-08-26): package-main test seams, swapped only in
+// tests, restored via t.Cleanup.
+var spawnRefresh = func() {
 	exe, err := os.Executable()
 	if err != nil {
 		return

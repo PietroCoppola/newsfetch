@@ -1,9 +1,11 @@
 package render_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/render"
@@ -122,6 +124,47 @@ func mustMulti(t *testing.T, stories []fetch.Story, now time.Time, width int, op
 		t.Fatalf("Multi: %v", err)
 	}
 	return got
+}
+
+// clampedWidth mirrors render's unexported minWidth: every width in the
+// narrow-width table clamps up to it, so it is the width the output must
+// respect.
+const clampedWidth = 10
+
+// TestMulti_NarrowWidthDoesNotPanic covers widths below the structural
+// minimum, where the multi renderers used to build negative-count
+// strings.Repeat runs and panic. Multi clamps like Boxed instead — and the
+// clamped width is a ceiling for the plain renderer's ticker rows too: a
+// ticker row wider than its hero box is a ragged render, not a narrow one.
+func TestMulti_NarrowWidthDoesNotPanic(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	stories := fixtureStories(now)
+	for _, width := range []int{0, 1, 3, 9} {
+		for _, boxed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("width=%d/boxed=%t", width, boxed), func(t *testing.T) {
+				got, err := render.Multi(stories, now, width, render.MultiOptions{
+					Marker: render.TickerBranch, Boxed: boxed,
+				})
+				if err != nil {
+					t.Fatalf("Multi(width=%d, boxed=%t) error: %v", width, boxed, err)
+				}
+				if got == "" {
+					t.Errorf("Multi(width=%d, boxed=%t) = empty, want a render", width, boxed)
+				}
+				if boxed {
+					return
+				}
+				// Box-drawing and marker glyphs are single-column and the
+				// fixtures are ASCII, so a rune count is a column count.
+				for i, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+					if n := utf8.RuneCountInString(line); n > clampedWidth {
+						t.Errorf("plain line %d is %d columns, want <= %d: %q",
+							i, n, clampedWidth, line)
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestMulti_ErrorsOnEmpty(t *testing.T) {
