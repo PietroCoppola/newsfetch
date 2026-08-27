@@ -43,6 +43,10 @@ const (
 // t.Cleanup(func() { newSource = original }) to avoid leaking the swap
 // into other tests. config.Validate guarantees only known names reach
 // this function in production, so the default branch is defence in depth.
+//
+// Sanctioned exception to the no-global-mutable-state convention
+// (CLAUDE.md, ruled 2026-08-26): package-main test seams, swapped only in
+// tests, restored via t.Cleanup.
 var newSource = func(name string) (fetch.Source, error) {
 	switch name {
 	case "hackernews":
@@ -622,6 +626,10 @@ func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now t
 // spawnRefresh launches the detached background refresh. Tests MAY swap
 // this to observe or suppress the spawn, but MUST restore via t.Cleanup —
 // same contract as newSource above.
+//
+// Sanctioned exception to the no-global-mutable-state convention
+// (CLAUDE.md, ruled 2026-08-26): package-main test seams, swapped only in
+// tests, restored via t.Cleanup.
 var spawnRefresh = func() {
 	exe, err := os.Executable()
 	if err != nil {
