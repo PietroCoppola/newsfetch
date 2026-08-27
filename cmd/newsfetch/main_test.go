@@ -222,6 +222,16 @@ func TestRunRefresh_UnopenableLockIsAFailureNotASkip(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
+	// Belt and braces: on a host where chmod does not deny (a
+	// permission-ignoring mount, CAP_DAC_OVERRIDE), the lock would open and
+	// the refresh would run — the suite must never reach real HN.
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		t.Error("source constructed — lock failure should abort before any fetch")
+		return nil, fmt.Errorf("source %q must not be built", name)
+	}
+	t.Cleanup(func() { newSource = original })
+
 	err = runRefresh()
 	if err == nil {
 		t.Fatal("runRefresh() = nil for an unopenable lock, want an error reaching refreshlog")
