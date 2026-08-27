@@ -30,9 +30,11 @@ var ErrHeld = errors.New("lock held elsewhere")
 // The first attempt is unconditional, so a zero timeout still tries once.
 //
 // Callers distinguish contention from real failure with
-// errors.Is(err, [ErrHeld]): only the timeout carries it, so an unopenable
-// lock file or a filesystem without flock support stays visible as a fault
-// instead of reading as "someone else has it".
+// errors.Is(err, [ErrHeld]): only a deadline reached while the lock was
+// genuinely held (EWOULDBLOCK) carries it. An unopenable lock file, a
+// filesystem without flock support, or an EINTR retry that exhausts the
+// deadline all stay visible as faults instead of reading as "someone else
+// has it".
 func Acquire(path string, timeout time.Duration) (*os.File, error) {
 	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -47,7 +49,7 @@ func Acquire(path string, timeout time.Duration) (*os.File, error) {
 		case errors.Is(err, syscall.EINTR), errors.Is(err, syscall.EWOULDBLOCK):
 			if time.Now().After(deadline) {
 				lock.Close()
-				return nil, fmt.Errorf("lock %s: %w for over %s", path, ErrHeld, timeout)
+				return nil, deadlineError(path, timeout, err)
 			}
 			if errors.Is(err, syscall.EWOULDBLOCK) {
 				// Held by someone else; back off before re-polling.
@@ -59,4 +61,21 @@ func Acquire(path string, timeout time.Duration) (*os.File, error) {
 			return nil, fmt.Errorf("lock %s: %w", path, err)
 		}
 	}
+}
+
+// deadlineError maps the errno that ended the final attempt to the error
+// [Acquire] returns once the deadline has passed. Only EWOULDBLOCK means
+// someone genuinely holds the lock, so only EWOULDBLOCK earns [ErrHeld];
+// an exhausted EINTR retry is a real failure and says so, carrying the
+// errno as its cause. Both name the lock path.
+//
+// The distinction matters most at a zero timeout, where a single
+// interrupted attempt reaches the deadline immediately: a caller that
+// skips its work on ErrHeld would otherwise skip because a signal landed,
+// not because another process was doing the job.
+func deadlineError(path string, timeout time.Duration, last error) error {
+	if errors.Is(last, syscall.EWOULDBLOCK) {
+		return fmt.Errorf("lock %s: %w for over %s", path, ErrHeld, timeout)
+	}
+	return fmt.Errorf("lock %s: retrying past %s deadline: %w", path, timeout, last)
 }
