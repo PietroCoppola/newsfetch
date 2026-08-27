@@ -92,9 +92,13 @@ func renderMultiPlain(stories []fetch.Story, now time.Time, width int, marker Ti
 	tickers := stories[1:]
 	for i, s := range tickers {
 		mk := markerSymbol(marker, i, len(tickers))
+		// The floor is 1, not minWidth: raising a squeezed budget back to
+		// minWidth would print ticker rows wider than the hero box they
+		// hang off. Multi's clamp keeps the real budget at 5 or more, and
+		// truncate copes with anything smaller.
 		budget := width - 2 - utf8.RuneCountInString(mk)
-		if budget < minWidth {
-			budget = minWidth
+		if budget < 1 {
+			budget = 1
 		}
 		b.WriteString("  " + mk + tickerBody(s, now, budget) + "\n")
 	}
