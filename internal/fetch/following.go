@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -29,10 +30,12 @@ type FeedSpec struct {
 // persists this into feedstate; it never sees the parsed stories directly.
 type FeedResult struct {
 	URL string
-	// ItemDates holds the publish time of every dated item in the fetched
-	// document, uncapped by MaxItems — the cadence rate feedstate computes
-	// from this describes the feed itself, not the subset kept for the
-	// pool. Nil when NotModified is true.
+	// ItemDates holds the publish time of every usable dated item in the
+	// fetched document, uncapped by MaxItems — the cadence rate feedstate
+	// computes from this describes the feed itself, not the subset kept
+	// for the pool. Items the parser rejected (no title, no link) and
+	// items whose link is not an absolute http(s) URL are not items, so
+	// they do not count. Nil when NotModified is true.
 	ItemDates    []time.Time
 	ETag         string
 	LastModified string
@@ -83,6 +86,11 @@ func (f *Following) Name() string { return "following" }
 // or broken feed never blocks or fails the rest; the caller reads the
 // three outputs together — stories to merge, results to persist into
 // feedstate, errors for the warning footer.
+//
+// The returned error map is keyed by FEED URL. [FetchAll]'s map has the
+// same type and shape but is keyed by SOURCE NAME ("hackernews"), so the
+// two are not interchangeable: merging them without re-keying would mix
+// namespaces and mislabel every warning. Keep them separate.
 func (f *Following) FetchFeeds(ctx context.Context) ([]Story, []FeedResult, map[string]error) {
 	if len(f.Feeds) == 0 {
 		return nil, nil, nil
@@ -180,6 +188,27 @@ func (f *Following) fetchOne(ctx context.Context, spec FeedSpec) (FeedResult, []
 	if err != nil {
 		return FeedResult{}, nil, fmt.Errorf("feed %s: %w", spec.URL, err)
 	}
+	base, err := url.Parse(spec.URL)
+	if err != nil {
+		return FeedResult{}, nil, fmt.Errorf("feed %s: parse feed url: %w", spec.URL, err)
+	}
+	// Item links may be relative — legal in Atom (RFC 4287 resolves them
+	// against the feed URL) and common in RSS too — so resolve them here,
+	// the only layer holding the base URL; the parser has none. Anything
+	// that does not resolve to an absolute http(s) URL is dropped whole,
+	// dates included: a link the renderer cannot open is not an item, and
+	// a non-http URL blanks Story.NormalisedHost, silently disabling the
+	// diversity host penalty.
+	resolved := make([]feedItem, 0, len(items))
+	for _, it := range items {
+		abs, ok := resolveItemURL(base, it.URL)
+		if !ok {
+			continue
+		}
+		it.URL = abs
+		resolved = append(resolved, it)
+	}
+	items = resolved
 
 	fetchedAt := time.Now().UTC()
 	for _, it := range items {
@@ -213,6 +242,20 @@ func (f *Following) fetchOne(ctx context.Context, spec FeedSpec) (FeedResult, []
 		})
 	}
 	return res, stories, nil
+}
+
+// resolveItemURL resolves link against the feed's own URL and reports
+// whether the result is a usable absolute http(s) URL.
+func resolveItemURL(base *url.URL, link string) (string, bool) {
+	ref, err := url.Parse(link)
+	if err != nil {
+		return "", false
+	}
+	abs := base.ResolveReference(ref)
+	if abs.Scheme != "http" && abs.Scheme != "https" {
+		return "", false
+	}
+	return abs.String(), true
 }
 
 // itemTime is the item's effective timestamp: its pubDate, or the fetch

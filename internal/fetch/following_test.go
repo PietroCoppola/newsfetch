@@ -415,6 +415,43 @@ func TestFollowing_NegativeMaxItemsDefaults(t *testing.T) {
 	}
 }
 
+func TestFollowing_ItemLinksResolvedAgainstFeedURL(t *testing.T) {
+	// Relative hrefs are legal Atom (RFC 4287, resolved against the feed
+	// URL) and appear in RSS too. Unresolved they render as dead links and
+	// blank Story.NormalisedHost, which silently disables the diversity
+	// host penalty. Non-http(s) schemes have no business in a rendered
+	// link at all.
+	body := rssFeedXML(
+		rssItemXML("Relative item", "/relative/post", "A relative link.", ""),
+		rssItemXML("Hostile item", "javascript:alert(1)", "A hostile scheme.", ""),
+		rssItemXML("Absolute item", "https://example.com/absolute", "An absolute link.", ""),
+	)
+	srv := newXMLServer(t, body)
+
+	f := &fetch.Following{Feeds: []fetch.FeedSpec{{URL: srv.URL, MaxItems: 10}}}
+	stories, results, errs := f.FetchFeeds(context.Background())
+	if errs != nil {
+		t.Fatalf("errs = %v, want nil", errs)
+	}
+	if len(stories) != 2 {
+		t.Fatalf("len(stories) = %d, want 2 (the javascript: item dropped); got %v", len(stories), stories)
+	}
+	if got := storyByURL(stories, srv.URL+"/relative/post"); got == nil {
+		t.Errorf("no story at %q; the relative link must resolve against the feed URL. stories = %v", srv.URL+"/relative/post", stories)
+	}
+	if got := storyByURL(stories, "https://example.com/absolute"); got == nil {
+		t.Error("the absolute link must survive unchanged")
+	}
+	for _, s := range stories {
+		if strings.HasPrefix(s.URL, "javascript:") {
+			t.Errorf("story %q kept a javascript: URL (%q)", s.Title, s.URL)
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+}
+
 func TestFollowing_UserAgent(t *testing.T) {
 	var (
 		uaMu  sync.Mutex
