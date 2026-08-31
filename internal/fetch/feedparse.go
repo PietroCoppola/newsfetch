@@ -29,13 +29,13 @@ type rssDoc struct {
 }
 
 type rssItem struct {
-	Title       string   `xml:"title"`
-	Link        string   `xml:"link"`
-	Description string   `xml:"description"`
-	PubDate     string   `xml:"pubDate"`
-	Categories  []string `xml:"category"`
-	Creator     string   `xml:"creator"` // dc:creator matches by local name
-	Author      string   `xml:"author"`
+	Titles       []string `xml:"title"`
+	Links        []string `xml:"link"`
+	Descriptions []string `xml:"description"`
+	PubDates     []string `xml:"pubDate"`
+	Categories   []string `xml:"category"`
+	Creators     []string `xml:"creator"` // dc:creator matches by local name
+	Authors      []string `xml:"author"`
 }
 
 type atomDoc struct {
@@ -44,14 +44,14 @@ type atomDoc struct {
 }
 
 type atomEntry struct {
-	Title      string     `xml:"title"`
-	Links      []atomLink `xml:"link"`
-	Summary    string     `xml:"summary"`
-	Content    string     `xml:"content"`
-	Published  string     `xml:"published"`
-	Updated    string     `xml:"updated"`
-	Categories []atomCat  `xml:"category"`
-	Author     atomPerson `xml:"author"`
+	Titles     []string     `xml:"title"`
+	Links      []atomLink   `xml:"link"`
+	Summaries  []atomText   `xml:"summary"`
+	Contents   []atomText   `xml:"content"`
+	Published  []string     `xml:"published"`
+	Updated    []string     `xml:"updated"`
+	Categories []atomCat    `xml:"category"`
+	Authors    []atomPerson `xml:"author"`
 }
 
 type atomLink struct {
@@ -67,6 +67,16 @@ type atomPerson struct {
 	Name string `xml:"name"`
 }
 
+// atomText is an Atom text construct (<summary>, <content>). Chardata
+// carries the text for type="text" and type="html" — the decoder has
+// already resolved entities and CDATA there — while type="xhtml" puts the
+// text inside child elements, where chardata sees nothing and only the raw
+// Inner markup has it.
+type atomText struct {
+	Chardata string `xml:",chardata"`
+	Inner    string `xml:",innerxml"`
+}
+
 // parseFeed parses an RSS 2.0 or Atom document. UTF-8 (with or without
 // BOM) only — a non-UTF-8 encoding declaration errors, per the locked
 // decision (14/14 surveyed feeds were UTF-8; revisit on a real report,
@@ -75,6 +85,16 @@ type atomPerson struct {
 // caller can substitute fetch time. Malformed XML fails the whole feed —
 // no partial salvage. The root element name is examined once to dispatch
 // to the correct format parser.
+//
+// One rule governs every text field on both paths: decode it as a SLICE
+// and take the first non-empty trimmed value. encoding/xml matches child
+// elements by local name only, so a namespaced sibling — <atom:link
+// rel="self"> inside an RSS <item> (Blogger, Atom→RSS bridges),
+// <dc:title>, <media:description>, <media:title> inside an Atom <entry> —
+// lands in the same field as the real element. A scalar field would take
+// whichever came LAST, so a foreign empty element would blank a required
+// field and silently drop the whole item, with the outcome depending on
+// element order. Extend this parser the same way: never a bare scalar.
 func parseFeed(data []byte) ([]feedItem, error) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 
@@ -102,11 +122,18 @@ func parseFeed(data []byte) ([]feedItem, error) {
 		}
 		items := make([]feedItem, 0, len(rss.Items))
 		for _, it := range rss.Items {
-			author := it.Creator
+			author := firstNonEmpty(it.Creators)
 			if author == "" {
-				author = it.Author
+				author = firstNonEmpty(it.Authors)
 			}
-			item, ok := buildItem(it.Title, it.Link, it.Description, author, it.Categories, it.PubDate)
+			item, ok := buildItem(
+				firstNonEmpty(it.Titles),
+				firstNonEmpty(it.Links),
+				firstNonEmpty(it.Descriptions),
+				author,
+				it.Categories,
+				firstNonEmpty(it.PubDates),
+			)
 			if ok {
 				items = append(items, item)
 			}
@@ -120,21 +147,25 @@ func parseFeed(data []byte) ([]feedItem, error) {
 		}
 		items := make([]feedItem, 0, len(atom.Entries))
 		for _, e := range atom.Entries {
-			date := e.Published
+			date := firstNonEmpty(e.Published)
 			if date == "" {
-				date = e.Updated
+				date = firstNonEmpty(e.Updated)
 			}
-			summary := e.Summary
+			summary := firstNonEmptyText(e.Summaries)
 			if summary == "" {
-				summary = e.Content
+				summary = firstNonEmptyText(e.Contents)
 			}
 			tags := make([]string, 0, len(e.Categories))
 			for _, c := range e.Categories {
-				if c.Term != "" {
-					tags = append(tags, c.Term)
+				tags = append(tags, c.Term)
+			}
+			author := ""
+			for _, a := range e.Authors {
+				if author = strings.TrimSpace(a.Name); author != "" {
+					break
 				}
 			}
-			item, ok := buildItem(e.Title, atomAlternate(e.Links), summary, e.Author.Name, tags, date)
+			item, ok := buildItem(firstNonEmpty(e.Titles), atomAlternate(e.Links), summary, author, tags, date)
 			if ok {
 				items = append(items, item)
 			}
@@ -146,28 +177,78 @@ func parseFeed(data []byte) ([]feedItem, error) {
 	}
 }
 
+// firstNonEmpty returns the first value in vals that is non-empty after
+// trimming, or "". See [parseFeed]'s doc for why every text field is a
+// slice.
+func firstNonEmpty(vals []string) string {
+	for _, v := range vals {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// firstNonEmptyText is [firstNonEmpty] for Atom text constructs,
+// preferring each element's decoded character data over its raw inner
+// markup (see [atomText]).
+func firstNonEmptyText(vals []atomText) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v.Chardata); s != "" {
+			return s
+		}
+		if s := strings.TrimSpace(v.Inner); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // buildItem applies the extraction contract: title and URL required
-// (else drop), summary HTML-stripped and entity-decoded, date
-// best-effort.
+// (else drop), summary HTML-stripped and entity-decoded, tags trimmed
+// with empties dropped, date best-effort.
 func buildItem(title, link, summary, author string, tags []string, date string) (feedItem, bool) {
 	title = strings.TrimSpace(title)
 	link = strings.TrimSpace(link)
 	if title == "" || link == "" {
 		return feedItem{}, false
 	}
+	// Tags reach Story.Tags, --style=json, and the diversity penalty,
+	// where two stories both carrying "" would count as sharing a tag.
+	clean := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			clean = append(clean, tag)
+		}
+	}
 	item := feedItem{
 		Title:   title,
 		URL:     link,
 		Summary: stripTags(summary),
 		Author:  strings.TrimSpace(author),
-		Tags:    tags,
+		Tags:    clean,
 	}
 	// RSS 2.0 mandates RFC 822-ish dates but the wild mixes named
-	// zones, four-digit years, and stray RFC 3339 (survey: pubDate was
-	// populated in 14/14 feeds, formats varied). Function-local per the
-	// no-package-level-mutable-state rule; off the render hot path.
+	// zones, four-digit years, omitted seconds, RFC 822's parenthesised
+	// zone comment, and stray RFC 3339 with or without a zone (survey:
+	// pubDate was populated in 14/14 feeds, formats varied). Function-
+	// local per the no-package-level-mutable-state rule; off the render
+	// hot path.
+	//
+	// The named-zone layouts (RFC1123, RFC822, and the "(MST)" variant)
+	// resolve an abbreviation against the LOCAL zone, so an abbreviation
+	// this machine's zone doesn't define parses as UTC with that name
+	// rather than failing. Accepted: a wrong-by-hours date is still a
+	// better cadence signal than no date at all, and the alternative is
+	// a hand-maintained abbreviation table.
 	layouts := []string{
 		time.RFC1123Z, time.RFC1123, time.RFC822Z, time.RFC822, time.RFC3339,
+		"Mon, 02 Jan 2006 15:04:05 -0700 (MST)",
+		"Mon, 02 Jan 2006 15:04 -0700",
+		"02 Jan 2006 15:04:05 -0700",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
 	}
 	for _, layout := range layouts {
 		if t, err := time.Parse(layout, strings.TrimSpace(date)); err == nil {

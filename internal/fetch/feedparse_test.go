@@ -157,6 +157,12 @@ func TestParseFeed_DateFormats(t *testing.T) {
 		{"RFC1123 named zone", "Mon, 24 Aug 2026 10:00:00 GMT", true},
 		{"RFC822Z two-digit year", "24 Aug 26 10:00 +0000", true},
 		{"RFC3339 leaks into RSS", "2026-08-24T10:00:00Z", true},
+		{"trailing zone comment", "Mon, 24 Aug 2026 10:00:00 -0400 (EDT)", true},
+		{"seconds omitted", "Mon, 24 Aug 2026 10:00 +0000", true},
+		{"no weekday, four-digit year", "24 Aug 2026 10:00:00 +0000", true},
+		{"zoneless RFC3339 with T", "2026-08-24T10:00:00", true},
+		{"zoneless timestamp with a space", "2026-08-24 10:00:00", true},
+		{"bare date", "2026-08-24", true},
 		{"garbage date -> HasDate false, item kept", "not a date", false},
 	}
 	for _, tc := range cases {
@@ -167,6 +173,108 @@ func TestParseFeed_DateFormats(t *testing.T) {
 			}
 			if items[0].HasDate != tc.wantDate {
 				t.Errorf("HasDate = %v, want %v", items[0].HasDate, tc.wantDate)
+			}
+		})
+	}
+}
+
+func TestParseFeed_ForeignNamespaceSiblingsKeepTheItem(t *testing.T) {
+	// encoding/xml matches child elements by LOCAL name, so a namespaced
+	// sibling sharing a local name ("atom:link" inside an RSS <item>, which
+	// Blogger and Atom→RSS bridges emit) competes for the same field. With
+	// a scalar field the last element wins, so element order decides
+	// whether the real link survives — and a lost link drops the whole item.
+	rssMk := func(inner string) string {
+		return `<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/">` +
+			`<channel><item>` + inner + `</item></channel></rss>`
+	}
+	atomMk := func(inner string) string {
+		return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/"` +
+			` xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">` +
+			`<entry>` + inner + `</entry></feed>`
+	}
+	const (
+		rssReal     = `<title>Real title</title><link>https://real.example/post</link><description>Real description</description>`
+		rssForeign  = `<atom:link rel="self" href="https://feed.example/rss.xml"/><dc:title/><media:description/>`
+		atomReal    = `<title>Real title</title><link rel="alternate" href="https://real.example/post"/><summary>Real description</summary>`
+		atomForeign = `<media:title/><itunes:summary/>`
+	)
+	cases := []struct {
+		name, doc string
+	}{
+		{"rss, real elements first", rssMk(rssReal + rssForeign)},
+		{"rss, foreign elements first", rssMk(rssForeign + rssReal)},
+		{"atom, real elements first", atomMk(atomReal + atomForeign)},
+		{"atom, foreign elements first", atomMk(atomForeign + atomReal)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := parseFeed([]byte(tc.doc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("items = %d, want 1 (a namespaced sibling must not blank a required field and drop the item)", len(items))
+			}
+			if items[0].Title != "Real title" {
+				t.Errorf("Title = %q, want %q", items[0].Title, "Real title")
+			}
+			if items[0].URL != "https://real.example/post" {
+				t.Errorf("URL = %q, want the item's own link, not the feed's self link", items[0].URL)
+			}
+			if items[0].Summary != "Real description" {
+				t.Errorf("Summary = %q, want %q", items[0].Summary, "Real description")
+			}
+		})
+	}
+}
+
+func TestParseFeed_RSSCategoriesTrimmedAndEmptiesDropped(t *testing.T) {
+	// Tags reach Story.Tags, --style=json, and the diversity penalty, where
+	// two stories both carrying "" would count as sharing a tag. The Atom
+	// path already drops empty terms; RSS must match it.
+	feed := "<rss version=\"2.0\"><channel><item><title>t</title><link>https://e.com/x</link>" +
+		"<category></category><category>\n   zig\n</category><category>   </category>" +
+		"<category>compilers</category></item></channel></rss>"
+	items, err := parseFeed([]byte(feed))
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%d err=%v", len(items), err)
+	}
+	want := []string{"zig", "compilers"}
+	got := items[0].Tags
+	if len(got) != len(want) {
+		t.Fatalf("Tags = %q, want %q (empties dropped, values trimmed)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Tags[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseFeed_AtomContentTypes(t *testing.T) {
+	// <content> carries its text three ways. Only the xhtml form puts the
+	// text in child elements, where a chardata-only decode sees nothing.
+	mk := func(content string) string {
+		return `<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>E</title>` +
+			`<link rel="alternate" href="https://e.org/1"/>` + content + `</entry></feed>`
+	}
+	cases := []struct {
+		name, content, want string
+	}{
+		{"plain text", `<content>Hello world</content>`, "Hello world"},
+		{"escaped html", `<content type="html">&lt;p&gt;Hello &amp; world&lt;/p&gt;</content>`, "Hello & world"},
+		{"cdata", `<content><![CDATA[Hello <b>world</b>]]></content>`, "Hello world"},
+		{"xhtml", `<content type="xhtml"><div><p>Hello <b>world</b></p></div></content>`, "Hello world"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := parseFeed([]byte(mk(tc.content)))
+			if err != nil || len(items) != 1 {
+				t.Fatalf("items=%d err=%v", len(items), err)
+			}
+			if items[0].Summary != tc.want {
+				t.Errorf("Summary = %q, want %q", items[0].Summary, tc.want)
 			}
 		})
 	}
