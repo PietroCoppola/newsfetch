@@ -57,7 +57,7 @@ const (
 	// scores by keeping the denominator away from zero.
 	ageOffsetHours = 2.0
 	// topicMatchMultiplier is the boost applied when any configured topic
-	// matches the story's matching surface (title or tags).
+	// matches the story's matching surface (title, tags, or summary).
 	topicMatchMultiplier = 2.0
 )
 
@@ -70,15 +70,15 @@ const (
 // of Story.Points (see addendum §11).
 //
 // topic_multiplier is [topicMatchMultiplier] when any configured topic
-// matches the story's matching surface (title, tags, and summary), else 1.0. M4
-// widened "matches the title" to "matches the title or any tag" so
-// source-provided tags from Lobste.rs (and future tagged sources)
-// contribute to topic relevance without per-source branches in the
-// ranker. M5 extends the surface to summary to improve feed coverage.
-// The boost therefore fires on signals invisible to the user (tags, summary),
-// which is intentional — the cleaner semantic is "topic matched any of the
-// story's relevance signals", and HN stories carry empty Tags and Summary so
-// their behaviour is unchanged.
+// matches the story's matching surface (title, tags, and summary),
+// else 1.0. M4 widened "matches the title" to "matches the title or
+// any tag" so source-provided tags from Lobste.rs (and future tagged
+// sources) contribute to topic relevance without per-source branches
+// in the ranker. M5 extends the surface to summary to improve feed
+// coverage. The boost therefore fires on signals invisible to the user
+// (tags, summary), which is intentional — the cleaner semantic is
+// "topic matched any of the story's relevance signals", and HN stories
+// carry empty Tags and Summary so their behaviour is unchanged.
 func Score(s fetch.Story, topics []string, now time.Time) float64 {
 	ageHours := now.Sub(s.CreatedAt).Hours()
 	if ageHours < 0 {

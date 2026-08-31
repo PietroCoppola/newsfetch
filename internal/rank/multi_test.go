@@ -162,17 +162,46 @@ func TestSelectN_FeedWeightsShiftSelection(t *testing.T) {
 
 func TestSelectN_NoFeedWeightIsNeutral(t *testing.T) {
 	now := refNow
-	stories := []fetch.Story{
-		{ID: "a", URL: "https://a.com/1", Points: 1000, CreatedAt: now.Add(-time.Hour)},
-		{ID: "b", URL: "https://b.com/1", Points: 10, CreatedAt: now.Add(-time.Hour)},
+	// Both halves of "no feed weight": an aggregator story with no Feed at
+	// all, and a feed-attributed story whose Feed has no entry in the map
+	// (configured since the last refresh, or never observed). Either way
+	// the multiplier must be a true 1.0 — not 0, which would make the
+	// story unselectable, and not some other feed's weight.
+	//
+	// Points: 1 gives the no-Feed story the same unit numerator Score
+	// substitutes for feed-attributed ones, so within each case the two
+	// candidates differ only by their multiplier.
+	cases := []struct {
+		name string
+		feed string
+	}{
+		{"a story with no Feed at all", ""},
+		{"a story whose Feed has no entry", "https://unmapped/feed"},
 	}
-	// Weights present but for other feeds: aggregator stories (Feed "")
-	// and unmapped feeds are untouched — the dominant story still wins
-	// under the deterministic seed-2 hero pick.
-	opts := rank.Options{Now: now, PoolSize: 2, FeedWeights: map[string]float64{"https://other/feed": 5.0}}
-	got := mustSelectN(t, stories, 1, opts, rand.New(rand.NewSource(2)))
-	if got[0].ID != "a" {
-		t.Errorf("hero = %s, want a (weights must not touch unmapped stories)", got[0].ID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stories := []fetch.Story{
+				{ID: "neutral", URL: "https://a.com/1", Points: 1, Feed: tc.feed, CreatedAt: now.Add(-time.Hour)},
+				{ID: "damped", URL: "https://b.com/1", Feed: "https://damped/feed", CreatedAt: now.Add(-time.Hour)},
+			}
+			opts := rank.Options{Now: now, PoolSize: 2, FeedWeights: map[string]float64{
+				"https://damped/feed": 0.04,
+			}}
+			// Same 25x gap and 50-seed calibration as
+			// TestSelectN_FeedWeightsShiftSelection: neutral's share is
+			// 25/26 ≈ 0.96, so a zeroed or misapplied multiplier fails
+			// decisively rather than marginally.
+			wins := 0
+			for seed := int64(0); seed < 50; seed++ {
+				got := mustSelectN(t, stories, 1, opts, rand.New(rand.NewSource(seed)))
+				if got[0].ID == "neutral" {
+					wins++
+				}
+			}
+			if wins < 40 {
+				t.Errorf("unweighted story won %d/50 against a 0.04-weighted feed; want >= 40 (an absent entry must mean neutral 1.0)", wins)
+			}
+		})
 	}
 }
 
