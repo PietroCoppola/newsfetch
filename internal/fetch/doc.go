@@ -21,6 +21,12 @@
 //   - Name returns a short, stable identifier (such as "hackernews") that is
 //     safe to embed in cache entries and user-visible output.
 //
+// [Following] is the deliberate exception: it does not implement Source
+// because the contract's "never a partial slice with a non-nil error"
+// promise cannot express a 304 (unchanged is not empty) or per-feed
+// partial failure, both of which the following pool's refresh pipeline
+// needs (design doc addendum §14).
+//
 // # Hot-path discipline
 //
 // Implementations may depend on net/http, encoding/json, and the stdlib time
