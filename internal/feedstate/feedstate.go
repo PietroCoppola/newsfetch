@@ -118,12 +118,14 @@ func Read(path string) (*File, error) {
 // sidecar feeds.lock (every state-file read-modify-write in this repo
 // holds lockfile.Acquire — seen.json and sessions.json set the pattern).
 // A 304-style observation (DatesKnown=false) refreshes ObservedAt but
-// keeps the stored pubDates and validators — an unchanged document has
-// unchanged dates, and Weights re-windows them at read time. A 200
-// replaces both validators outright, empty values included, so a feed
-// that stops sending one is recorded as such rather than pinned to a
-// stale validator forever (the fetcher already back-fills a 304's
-// validators, so a real 200 is the only case reaching this branch).
+// keeps the stored pubDates — an unchanged document has unchanged dates,
+// and Weights re-windows them at read time. Validators are never kept:
+// every observation replaces both outright, empty values included, so a
+// feed that stops sending one is recorded as such rather than pinned to
+// a stale validator forever. That is safe on a 304 because the caller
+// has already resolved the pair — the fetcher prefers the response's own
+// headers, which RFC 7232 permits a 304 to regenerate, and back-fills
+// the ones it sent when the response omits them.
 // Stored dates are pruned to those newer than now−4w on every write
 // (future dates kept: they start counting when the window reaches them).
 // FirstSeen is set on first sight and never moves — it anchors the
@@ -158,12 +160,16 @@ func Update(path string, configured []string, obs []Observation, now time.Time) 
 			if len(o.PubDates) > 0 {
 				fd.SeenDated = true
 			}
-			// A real 200: its validators are the whole truth, including
-			// the absence of one. Overwriting only non-empty values would
-			// pin a validator the server has stopped sending.
-			fd.ETag = o.ETag
-			fd.LastModified = o.LastModified
 		}
+		// The observation is the whole truth about validators, including
+		// the absence of one: overwriting only non-empty values would pin
+		// a validator the server has stopped sending. This is unconditional
+		// because the caller has already resolved them — a 304 reports
+		// either the response's regenerated validator (RFC 7232 allows one,
+		// and it must be stored) or the pair the fetch sent, which is what
+		// is stored already.
+		fd.ETag = o.ETag
+		fd.LastModified = o.LastModified
 		fd.ObservedAt = now
 		byURL[o.URL] = fd
 	}

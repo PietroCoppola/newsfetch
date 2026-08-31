@@ -64,12 +64,9 @@ func TestUpdate_UpsertsGCsAndPrunes(t *testing.T) {
 	if len(f.Feeds) != 2 {
 		t.Fatalf("feeds = %d, want 2 (b GC'd): %+v", len(f.Feeds), f.Feeds)
 	}
-	// An unchanged document leaves the stored validators alone too, even
-	// when the observation carries one: only a 200 speaks for them (see
-	// TestUpdate_ValidatorsFollowThe200).
 	etag, _ := f.Validators("https://a/feed")
-	if etag != `"v1"` {
-		t.Errorf("a's etag = %q, want v1 (a 304 must not overwrite stored validators)", etag)
+	if etag != `"v2"` {
+		t.Errorf("a's etag = %q, want v2", etag)
 	}
 	var a feedstate.Feed
 	for _, fd := range f.Feeds {
@@ -286,7 +283,12 @@ func TestWeights_RollsAcrossNotModified(t *testing.T) {
 	}
 }
 
-func TestUpdate_ValidatorsFollowThe200(t *testing.T) {
+// TestUpdate_ValidatorsFollowTheObservation pins both directions of the
+// rule that the observation is always the truth about validators. The
+// caller resolves them before reporting: fetchOne prefers the response's
+// own headers and back-fills the ones it sent when a 304 omits them, so
+// what arrives here is either newer than the stored pair or equal to it.
+func TestUpdate_ValidatorsFollowTheObservation(t *testing.T) {
 	const url = "https://a/feed"
 	const firstLM = "Mon, 24 Aug 2026 10:00:00 GMT"
 	const secondLM = "Tue, 25 Aug 2026 10:00:00 GMT"
@@ -312,10 +314,25 @@ func TestUpdate_ValidatorsFollowThe200(t *testing.T) {
 			wantETag: `"v2"`, wantLM: secondLM,
 		},
 		{
-			// 304: the fetcher back-fills whichever validator the server did
-			// not resend, but the store must keep its own regardless.
-			name:     "a 304 keeps the stored pair",
-			second:   feedstate.Observation{URL: url, DatesKnown: false},
+			// RFC 7232 lets a server regenerate the validator on a 304 and
+			// expects the client to store the new one. Gating the write on
+			// "was this a 200" would throw that refresh away.
+			name: "a 304 carrying refreshed validators updates both",
+			second: feedstate.Observation{
+				URL: url, DatesKnown: false,
+				ETag: `"v2"`, LastModified: secondLM,
+			},
+			wantETag: `"v2"`, wantLM: secondLM,
+		},
+		{
+			// The shape fetchOne produces when a 304 resends neither
+			// validator: it back-fills the ones it sent, so the write is a
+			// no-op restatement of what is already stored.
+			name: "a 304 that resent neither keeps the back-filled pair",
+			second: feedstate.Observation{
+				URL: url, DatesKnown: false,
+				ETag: `"v1"`, LastModified: firstLM,
+			},
 			wantETag: `"v1"`, wantLM: firstLM,
 		},
 	}
