@@ -3,10 +3,12 @@ package fetch_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -157,10 +159,16 @@ func TestFollowing_FetchFeeds_FanOut(t *testing.T) {
 	if len(rssRes.ItemDates) != 3 {
 		t.Fatalf("RSS ItemDates = %v, want exactly 3 (all dated items, uncapped by MaxItems)", rssRes.ItemDates)
 	}
-	wantDates := map[int64]bool{oldest.Unix(): true, middle.Unix(): true, newest.Unix(): true}
+	// Count occurrences rather than just membership: a bug that emitted
+	// [newest, newest, newest] would still pass a pure membership check
+	// against len==3, so pin each expected date to exactly one occurrence.
+	seen := make(map[int64]int, 3)
 	for _, d := range rssRes.ItemDates {
-		if !wantDates[d.Unix()] {
-			t.Errorf("unexpected ItemDates entry %v", d)
+		seen[d.Unix()]++
+	}
+	for _, want := range []time.Time{oldest, middle, newest} {
+		if seen[want.Unix()] != 1 {
+			t.Errorf("ItemDates contains %v %d time(s), want exactly 1 (ItemDates = %v)", want, seen[want.Unix()], rssRes.ItemDates)
 		}
 	}
 }
@@ -169,10 +177,16 @@ func TestFollowing_ConditionalGET(t *testing.T) {
 	const sentETag = `"tag1"`
 	const sentLM = "Mon, 02 Jan 2006 15:04:05 GMT"
 
-	var gotINM, gotIMS string
+	var (
+		hdrMu  sync.Mutex
+		gotINM string
+		gotIMS string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdrMu.Lock()
 		gotINM = r.Header.Get("If-None-Match")
 		gotIMS = r.Header.Get("If-Modified-Since")
+		hdrMu.Unlock()
 		w.Header().Set("ETag", `"tag2"`)
 		w.WriteHeader(http.StatusNotModified)
 	}))
@@ -195,11 +209,14 @@ func TestFollowing_ConditionalGET(t *testing.T) {
 	if len(stories) != 0 {
 		t.Errorf("stories = %v, want none for a 304", stories)
 	}
-	if gotINM != sentETag {
-		t.Errorf("server saw If-None-Match = %q, want %q", gotINM, sentETag)
+	hdrMu.Lock()
+	gotINMSnapshot, gotIMSSnapshot := gotINM, gotIMS
+	hdrMu.Unlock()
+	if gotINMSnapshot != sentETag {
+		t.Errorf("server saw If-None-Match = %q, want %q", gotINMSnapshot, sentETag)
 	}
-	if gotIMS != sentLM {
-		t.Errorf("server saw If-Modified-Since = %q, want %q", gotIMS, sentLM)
+	if gotIMSSnapshot != sentLM {
+		t.Errorf("server saw If-Modified-Since = %q, want %q", gotIMSSnapshot, sentLM)
 	}
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -262,8 +279,11 @@ func TestFollowing_PartialFailure(t *testing.T) {
 }
 
 func TestFollowing_SlowFeedTimesOutAlone(t *testing.T) {
+	const slowSleep = 200 * time.Millisecond
+	const perFeedTimeout = 50 * time.Millisecond
+
 	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(slowSleep)
 		fmt.Fprint(w, rssFeedXML(rssItemXML("Too slow", "https://example.com/slow", "n/a", "")))
 	}))
 	t.Cleanup(slowSrv.Close)
@@ -276,21 +296,33 @@ func TestFollowing_SlowFeedTimesOutAlone(t *testing.T) {
 			{URL: slowSrv.URL},
 			{URL: fastSrv.URL},
 		},
-		PerFeedTimeout: 50 * time.Millisecond,
+		PerFeedTimeout: perFeedTimeout,
 	}
 
 	start := time.Now()
 	stories, _, errs := f.FetchFeeds(context.Background())
 	elapsed := time.Since(start)
 
-	if elapsed >= time.Second {
-		t.Errorf("FetchFeeds took %v, want well under 1s", elapsed)
+	// Bounded comfortably above the 50ms sub-timeout (so this isn't itself
+	// flaky under load) but well below the slow handler's 200ms sleep —
+	// proves the call actually returned early rather than blocking for the
+	// slow feed, i.e. per-feed isolation, not merely "returns eventually".
+	const upperBound = 150 * time.Millisecond
+	if elapsed >= upperBound {
+		t.Errorf("FetchFeeds took %v, want under %v (well below the slow handler's %v sleep, proving isolation)", elapsed, upperBound, slowSleep)
 	}
 	if got := storyByURL(stories, "https://example.com/fast"); got == nil {
 		t.Errorf("fast feed's story missing; stories = %v", stories)
 	}
-	if _, ok := errs[slowSrv.URL]; !ok {
-		t.Errorf("errs missing entry for the slow feed %q; errs = %v", slowSrv.URL, errs)
+	slowErr, ok := errs[slowSrv.URL]
+	if !ok {
+		t.Fatalf("errs missing entry for the slow feed %q; errs = %v", slowSrv.URL, errs)
+	}
+	// errors.Is against context.DeadlineExceeded proves the per-feed
+	// sub-timeout actually fired, rather than some other transport failure
+	// that happened to also produce a non-nil error.
+	if !errors.Is(slowErr, context.DeadlineExceeded) {
+		t.Errorf("slow feed error = %v, want it to unwrap to context.DeadlineExceeded", slowErr)
 	}
 }
 
@@ -324,8 +356,15 @@ func TestFollowing_BodyCapAndUndated(t *testing.T) {
 		if len(results) != 0 {
 			t.Errorf("results = %v, want none", results)
 		}
-		if errs[srv.URL] == nil {
+		bodyErr := errs[srv.URL]
+		if bodyErr == nil {
 			t.Fatalf("errs = %v, want an entry for the oversized feed", errs)
+		}
+		// Assert on the guard's own message, not just "some error" — junk
+		// bytes also fail XML parsing, so a membership-only check here
+		// would pass even if the maxFeedBody guard were deleted entirely.
+		if !strings.Contains(bodyErr.Error(), "body exceeds") {
+			t.Errorf("oversized-feed error = %q, want it to contain %q (the maxFeedBody guard, not a parse failure)", bodyErr.Error(), "body exceeds")
 		}
 	})
 
@@ -377,9 +416,14 @@ func TestFollowing_NegativeMaxItemsDefaults(t *testing.T) {
 }
 
 func TestFollowing_UserAgent(t *testing.T) {
-	var gotUA string
+	var (
+		uaMu  sync.Mutex
+		gotUA string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uaMu.Lock()
 		gotUA = r.Header.Get("User-Agent")
+		uaMu.Unlock()
 		fmt.Fprint(w, rssFeedXML(rssItemXML("UA check", "https://example.com/ua", "n/a", "")))
 	}))
 	t.Cleanup(srv.Close)
@@ -389,7 +433,41 @@ func TestFollowing_UserAgent(t *testing.T) {
 	if errs != nil {
 		t.Fatalf("errs = %v, want nil", errs)
 	}
-	if !strings.HasPrefix(gotUA, "newsfetch/") {
-		t.Errorf("User-Agent = %q, want a %q prefix", gotUA, "newsfetch/")
+	uaMu.Lock()
+	uaSnapshot := gotUA
+	uaMu.Unlock()
+	if !strings.HasPrefix(uaSnapshot, "newsfetch/") {
+		t.Errorf("User-Agent = %q, want a %q prefix", uaSnapshot, "newsfetch/")
+	}
+}
+
+func TestFollowing_UndatedItemSortsAsNewest(t *testing.T) {
+	// Locked decision: undated items sort as newest (fetch time). Far-
+	// future literal dates elsewhere in this file make the undated item
+	// sort LAST (it's older than 2030+ fixtures), so that ordering half of
+	// the rule is otherwise never exercised — only CreatedAt's value is
+	// checked (see the "undated item gets fetch time" subcase above). Past
+	// dated items plus MaxItems: 1 pins the ordering: only the undated
+	// item can survive the cap if it truly sorts newest.
+	past1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	past2 := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	body := rssFeedXML(
+		rssItemXML("Old item one", "https://example.com/sort/old1", "Old summary one.", past1.Format(time.RFC1123Z)),
+		rssItemXML("Old item two", "https://example.com/sort/old2", "Old summary two.", past2.Format(time.RFC1123Z)),
+		rssItemXML("Undated item", "https://example.com/sort/undated", "No pubDate at all.", ""),
+	)
+	srv := newXMLServer(t, body)
+
+	f := &fetch.Following{Feeds: []fetch.FeedSpec{{URL: srv.URL, MaxItems: 1}}}
+	stories, _, errs := f.FetchFeeds(context.Background())
+	if errs != nil {
+		t.Fatalf("errs = %v, want nil", errs)
+	}
+	if len(stories) != 1 {
+		t.Fatalf("len(stories) = %d, want 1", len(stories))
+	}
+	if got := stories[0].URL; got != "https://example.com/sort/undated" {
+		t.Errorf("kept story URL = %q, want the undated item (it must sort newest, ahead of both past-dated items)", got)
 	}
 }
