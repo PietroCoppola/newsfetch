@@ -64,9 +64,12 @@ func TestUpdate_UpsertsGCsAndPrunes(t *testing.T) {
 	if len(f.Feeds) != 2 {
 		t.Fatalf("feeds = %d, want 2 (b GC'd): %+v", len(f.Feeds), f.Feeds)
 	}
+	// An unchanged document leaves the stored validators alone too, even
+	// when the observation carries one: only a 200 speaks for them (see
+	// TestUpdate_ValidatorsFollowThe200).
 	etag, _ := f.Validators("https://a/feed")
-	if etag != `"v2"` {
-		t.Errorf("a's etag = %q, want v2", etag)
+	if etag != `"v1"` {
+		t.Errorf("a's etag = %q, want v1 (a 304 must not overwrite stored validators)", etag)
 	}
 	var a feedstate.Feed
 	for _, fd := range f.Feeds {
@@ -108,15 +111,21 @@ func TestUpdate_ConcurrentWritersRetainAll(t *testing.T) {
 	}
 }
 
+// Every Feed literal in the weighting tests below sets SeenDated: true —
+// these feeds have all demonstrated a cadence at some point, which is what
+// makes a current rate of 0 mean "went quiet" (dormant, boosted) rather
+// than "never carried a date" (no signal, neutral). The two cases that
+// turn on the flag itself are TestWeights_NeverDatedFeedIsNeutralNotDormant
+// and TestWeights_OnceDatedFeedStillEarnsDormantBoost.
 func TestWeights(t *testing.T) {
 	old := now.Add(-8 * week) // 8 weeks: full confidence
 	expired := []time.Time{now.Add(-5 * week), now.Add(-6 * week), now.Add(-7 * week)}
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
-		{URL: "busy", FirstSeen: old, PubDates: datesWithin(16), ObservedAt: now},  // 4.0/wk
-		{URL: "median", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now}, // 1.0/wk
-		{URL: "rare", FirstSeen: old, PubDates: datesWithin(1), ObservedAt: now},   // 0.25/wk
-		{URL: "dormant", FirstSeen: old, PubDates: expired, ObservedAt: now},       // 0/wk: rolled out
-		{URL: "unconfigured", FirstSeen: old, PubDates: datesWithin(9), ObservedAt: now},
+		{URL: "busy", FirstSeen: old, PubDates: datesWithin(16), ObservedAt: now, SeenDated: true},  // 4.0/wk
+		{URL: "median", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now, SeenDated: true}, // 1.0/wk
+		{URL: "rare", FirstSeen: old, PubDates: datesWithin(1), ObservedAt: now, SeenDated: true},   // 0.25/wk
+		{URL: "dormant", FirstSeen: old, PubDates: expired, ObservedAt: now, SeenDated: true},       // 0/wk: rolled out
+		{URL: "unconfigured", FirstSeen: old, PubDates: datesWithin(9), ObservedAt: now, SeenDated: true},
 	}}
 	configured := []string{"busy", "median", "rare", "dormant", "fresh-no-observation"}
 	w := f.Weights(configured, now)
@@ -127,6 +136,12 @@ func TestWeights(t *testing.T) {
 	}
 	if got := w["rare"]; math.Abs(got-0.625/0.25) > 1e-9 {
 		t.Errorf("rare = %v, want %v", got, 0.625/0.25)
+	}
+	// The feed whose rate defines the reference is the one that pins the
+	// reference itself: median/1.0 = 0.625 only if the median really is
+	// the median. A mean would give (4+1+0.25+0)/4 = 1.3125 here.
+	if got := w["median"]; math.Abs(got-0.625) > 1e-9 {
+		t.Errorf("median = %v, want 0.625 (median/its own rate)", got)
 	}
 	if got := w["dormant"]; got != 5.0 {
 		t.Errorf("dormant (all dates expired) = %v, want capped 5.0", got)
@@ -157,8 +172,8 @@ func TestWeights_WindowBoundaries(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
-				{URL: "anchor", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now}, // 1.0/wk
-				{URL: "probe", FirstSeen: old, PubDates: tc.dates, ObservedAt: now},
+				{URL: "anchor", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now, SeenDated: true}, // 1.0/wk
+				{URL: "probe", FirstSeen: old, PubDates: tc.dates, ObservedAt: now, SeenDated: true},
 			}}
 			w := f.Weights([]string{"anchor", "probe"}, now)
 			if got := w["probe"]; math.Abs(got-tc.wantProbe) > 1e-9 {
@@ -171,9 +186,9 @@ func TestWeights_WindowBoundaries(t *testing.T) {
 func TestWeights_ZeroMedianFallsBackToNonzero(t *testing.T) {
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
-		{URL: "d1", FirstSeen: old, ObservedAt: now},                                            // 0/wk
-		{URL: "d2", FirstSeen: old, PubDates: []time.Time{now.Add(-5 * week)}, ObservedAt: now}, // 0/wk
-		{URL: "busy", FirstSeen: old, PubDates: datesWithin(16), ObservedAt: now},               // 4.0/wk
+		{URL: "d1", FirstSeen: old, ObservedAt: now, SeenDated: true},                                            // 0/wk
+		{URL: "d2", FirstSeen: old, PubDates: []time.Time{now.Add(-5 * week)}, ObservedAt: now, SeenDated: true}, // 0/wk
+		{URL: "busy", FirstSeen: old, PubDates: datesWithin(16), ObservedAt: now, SeenDated: true},               // 4.0/wk
 	}}
 	w := f.Weights([]string{"d1", "d2", "busy"}, now)
 	// rates {0, 0, 4.0} → median 0 → fall back to nonzero median 4.0:
@@ -192,8 +207,8 @@ func TestWeights_ZeroMedianFallsBackToNonzero(t *testing.T) {
 func TestWeights_AllDormantNeutral(t *testing.T) {
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
-		{URL: "d1", FirstSeen: old, ObservedAt: now},
-		{URL: "d2", FirstSeen: old, ObservedAt: now},
+		{URL: "d1", FirstSeen: old, ObservedAt: now, SeenDated: true},
+		{URL: "d2", FirstSeen: old, ObservedAt: now, SeenDated: true},
 	}}
 	w := f.Weights([]string{"d1", "d2"}, now)
 	// No in-window activity anywhere: no signal. Uniform weights are
@@ -207,8 +222,8 @@ func TestWeights_ColdStartBlend(t *testing.T) {
 	twoWeeks := now.Add(-2 * week) // confidence 0.5
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
-		{URL: "new-rare", FirstSeen: twoWeeks, PubDates: datesWithin(1), ObservedAt: now}, // 0.25/wk
-		{URL: "anchor", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now},        // 1.0/wk
+		{URL: "new-rare", FirstSeen: twoWeeks, PubDates: datesWithin(1), ObservedAt: now, SeenDated: true}, // 0.25/wk
+		{URL: "anchor", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now, SeenDated: true},        // 1.0/wk
 	}}
 	w := f.Weights([]string{"new-rare", "anchor"}, now)
 	// median of {0.25, 1.0} = 0.625; computed = 0.625/0.25 = 2.5;
@@ -221,8 +236,8 @@ func TestWeights_ColdStartBlend(t *testing.T) {
 func TestWeights_FutureFirstSeenClampsToNeutral(t *testing.T) {
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
-		{URL: "skewed", FirstSeen: now.Add(week), PubDates: datesWithin(16), ObservedAt: now},
-		{URL: "anchor", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now},
+		{URL: "skewed", FirstSeen: now.Add(week), PubDates: datesWithin(16), ObservedAt: now, SeenDated: true},
+		{URL: "anchor", FirstSeen: old, PubDates: datesWithin(4), ObservedAt: now, SeenDated: true},
 	}}
 	w := f.Weights([]string{"skewed", "anchor"}, now)
 	// A future FirstSeen (clock skew) must clamp confidence to 0, never
@@ -265,6 +280,136 @@ func TestWeights_RollsAcrossNotModified(t *testing.T) {
 	// dates / 4 weeks = 1.0; rates {0, 1.0} → median 0.5 → b = 0.5.
 	if got := w["https://a/feed"]; got != 5.0 {
 		t.Errorf("a = %v, want 5.0 (dormancy must arrive across 304s — the window rolls even when the document doesn't)", got)
+	}
+	if got := w["https://b/feed"]; math.Abs(got-0.5) > 1e-9 {
+		t.Errorf("b = %v, want 0.5", got)
+	}
+}
+
+func TestUpdate_ValidatorsFollowThe200(t *testing.T) {
+	const url = "https://a/feed"
+	const firstLM = "Mon, 24 Aug 2026 10:00:00 GMT"
+	const secondLM = "Tue, 25 Aug 2026 10:00:00 GMT"
+	cases := []struct {
+		name             string
+		second           feedstate.Observation
+		wantETag, wantLM string
+	}{
+		{
+			// The guard that only overwrote non-empty validators made it
+			// impossible to record that a feed STOPPED sending one, pinning
+			// a stale validator forever and re-requesting against a
+			// validator the server no longer honours.
+			name:   "a 200 that stopped sending validators clears both",
+			second: feedstate.Observation{URL: url, PubDates: datesWithin(1), DatesKnown: true},
+		},
+		{
+			name: "a 200 replaces both validators",
+			second: feedstate.Observation{
+				URL: url, PubDates: datesWithin(1), DatesKnown: true,
+				ETag: `"v2"`, LastModified: secondLM,
+			},
+			wantETag: `"v2"`, wantLM: secondLM,
+		},
+		{
+			// 304: the fetcher back-fills whichever validator the server did
+			// not resend, but the store must keep its own regardless.
+			name:     "a 304 keeps the stored pair",
+			second:   feedstate.Observation{URL: url, DatesKnown: false},
+			wantETag: `"v1"`, wantLM: firstLM,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tmp(t)
+			if err := feedstate.Update(path, []string{url}, []feedstate.Observation{
+				{URL: url, PubDates: datesWithin(1), DatesKnown: true, ETag: `"v1"`, LastModified: firstLM},
+			}, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := feedstate.Update(path, []string{url}, []feedstate.Observation{tc.second}, now.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			f, err := feedstate.Read(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			etag, lm := f.Validators(url)
+			if etag != tc.wantETag {
+				t.Errorf("ETag = %q, want %q", etag, tc.wantETag)
+			}
+			if lm != tc.wantLM {
+				t.Errorf("LastModified = %q, want %q", lm, tc.wantLM)
+			}
+		})
+	}
+}
+
+func TestWeights_NeverDatedFeedIsNeutralNotDormant(t *testing.T) {
+	// A feed whose dates all fail to parse reports zero pubDates, which was
+	// indistinguishable from "published nothing in four weeks" and earned
+	// the max dormant boost — while every undated item also takes fetch
+	// time as CreatedAt, i.e. maximal recency. 5.0 × max recency forever,
+	// on one malformed feed. No signal is not dormancy.
+	path := tmp(t)
+	early := now.Add(-8 * week) // full confidence by `now`
+	cfg := []string{"https://undated/feed", "https://dated/feed"}
+	if err := feedstate.Update(path, cfg, []feedstate.Observation{
+		{URL: "https://undated/feed", DatesKnown: true}, // 200, not one parseable date
+		{URL: "https://dated/feed", PubDates: datesWithin(4), DatesKnown: true},
+	}, early); err != nil {
+		t.Fatal(err)
+	}
+	f, err := feedstate.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := f.Weights(cfg, now)
+	if got := w["https://undated/feed"]; got != 1.0 {
+		t.Errorf("never-dated feed = %v, want neutral 1.0 (no cadence signal is not dormancy)", got)
+	}
+	// The never-dated feed must also stay out of the corpus median, the
+	// same as a feed with no observation at all: a rate it never reported
+	// is not a zero to average in. Alone in the corpus, dated's own rate
+	// is the reference, so it is exactly neutral.
+	if got := w["https://dated/feed"]; math.Abs(got-1.0) > 1e-9 {
+		t.Errorf("dated feed = %v, want 1.0 (a never-dated feed must not drag the median)", got)
+	}
+}
+
+func TestWeights_OnceDatedFeedStillEarnsDormantBoost(t *testing.T) {
+	// The other half of the rule: the 5.0 exists for a feed that showed a
+	// cadence and went quiet. The flag is recorded on the first pass and
+	// must survive the round-trip through feeds.json — and must not be
+	// cleared by a later fetch that carries no dates.
+	path := tmp(t)
+	later := now.Add(6 * week)
+	cfg := []string{"https://a/feed", "https://b/feed"}
+	bDates := []time.Time{
+		later.Add(-1 * time.Hour), later.Add(-2 * time.Hour),
+		later.Add(-3 * time.Hour), later.Add(-4 * time.Hour),
+	}
+	if err := feedstate.Update(path, cfg, []feedstate.Observation{
+		{URL: "https://a/feed", PubDates: []time.Time{now.Add(-time.Hour)}, DatesKnown: true},
+		{URL: "https://b/feed", PubDates: bDates, DatesKnown: true},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	// Six weeks on, a's document still parses but carries nothing dated.
+	if err := feedstate.Update(path, cfg, []feedstate.Observation{
+		{URL: "https://a/feed", DatesKnown: true},
+		{URL: "https://b/feed", PubDates: bDates, DatesKnown: true},
+	}, later); err != nil {
+		t.Fatal(err)
+	}
+	f, err := feedstate.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := f.Weights(cfg, later)
+	// rates {0 (a), 1.0 (b)} → median 0.5; a is dormant, b is 0.5/1.0.
+	if got := w["https://a/feed"]; got != 5.0 {
+		t.Errorf("a = %v, want 5.0 (a feed that once reported dates stays dormant-eligible across a round-trip)", got)
 	}
 	if got := w["https://b/feed"]; math.Abs(got-0.5) > 1e-9 {
 		t.Errorf("b = %v, want 0.5", got)

@@ -42,12 +42,23 @@ var ErrSchemaVersion = errors.New("feedstate: unsupported schema version")
 
 // Feed is the persisted state for one configured feed URL.
 type Feed struct {
-	URL          string      `json:"url"`
-	FirstSeen    time.Time   `json:"first_seen"`
-	ObservedAt   time.Time   `json:"observed_at"`
-	PubDates     []time.Time `json:"pub_dates"` // dated items from the last fetched doc, write-pruned to the 4-week window (future dates kept)
-	ETag         string      `json:"etag"`
-	LastModified string      `json:"last_modified"`
+	URL       string    `json:"url"`
+	FirstSeen time.Time `json:"first_seen"`
+	// ObservedAt is the time of the last fetch that reached this feed,
+	// 304s included. Nothing in the fetch/weighting path reads it; it is
+	// recorded for Part 2's staleness reporting and diagnostics ("last
+	// checked N hours ago"), which is the only way to tell a feed that is
+	// quiet from one that has not been polled.
+	ObservedAt time.Time   `json:"observed_at"`
+	PubDates   []time.Time `json:"pub_dates"` // dated items from the last fetched doc, write-pruned to the 4-week window (future dates kept)
+	// SeenDated records that this feed has reported at least one dated
+	// item at least once. It gates the dormant boost: a feed that has
+	// never carried a parseable date has no cadence signal at all (as
+	// opposed to a demonstrated cadence that went quiet), and no signal
+	// means neutral, not maximum boost. Set once, never cleared.
+	SeenDated    bool   `json:"seen_dated"`
+	ETag         string `json:"etag"`
+	LastModified string `json:"last_modified"`
 }
 
 // File is the on-disk feed-state layout. JSON tags are part of the schema
@@ -106,13 +117,18 @@ func Read(path string) (*File, error) {
 // feeds no longer in the configured list, under an exclusive lock on a
 // sidecar feeds.lock (every state-file read-modify-write in this repo
 // holds lockfile.Acquire — seen.json and sessions.json set the pattern).
-// A 304-style observation (DatesKnown=false) refreshes validators and
-// ObservedAt but keeps the stored pubDates — an unchanged document has
-// unchanged dates, and Weights re-windows them at read time. Stored
-// dates are pruned to those newer than now−4w on every write (future
-// dates kept: they start counting when the window reaches them).
+// A 304-style observation (DatesKnown=false) refreshes ObservedAt but
+// keeps the stored pubDates and validators — an unchanged document has
+// unchanged dates, and Weights re-windows them at read time. A 200
+// replaces both validators outright, empty values included, so a feed
+// that stops sending one is recorded as such rather than pinned to a
+// stale validator forever (the fetcher already back-fills a 304's
+// validators, so a real 200 is the only case reaching this branch).
+// Stored dates are pruned to those newer than now−4w on every write
+// (future dates kept: they start counting when the window reaches them).
 // FirstSeen is set on first sight and never moves — it anchors the
-// cadence confidence blend.
+// cadence confidence blend. SeenDated latches true on the first
+// observation that carries a date and is never cleared.
 func Update(path string, configured []string, obs []Observation, now time.Time) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -139,11 +155,13 @@ func Update(path string, configured []string, obs []Observation, now time.Time) 
 		}
 		if o.DatesKnown {
 			fd.PubDates = append([]time.Time(nil), o.PubDates...)
-		}
-		if o.ETag != "" {
+			if len(o.PubDates) > 0 {
+				fd.SeenDated = true
+			}
+			// A real 200: its validators are the whole truth, including
+			// the absence of one. Overwriting only non-empty values would
+			// pin a validator the server has stopped sending.
 			fd.ETag = o.ETag
-		}
-		if o.LastModified != "" {
 			fd.LastModified = o.LastModified
 		}
 		fd.ObservedAt = now
@@ -226,7 +244,18 @@ func (f *File) Validators(url string) (etag, lastModified string) {
 // 5.0 before the blend. Cold start blends toward neutral: confidence =
 // clamp(age/4wk, 0, 1); w = conf*computed + (1-conf)*1.0 — so the
 // final weight sits in (0, 5.0] by construction, the same bound the
-// config gives manual weights. Feeds with no observation are neutral.
+// config gives manual weights.
+//
+// A feed with no observation is neutral, and so is a feed that has never
+// once reported a dated item (!SeenDated): a document whose dates are
+// all unparseable yields the same empty pubDates as a genuinely quiet
+// feed, but it carries NO cadence signal rather than a demonstrated
+// cadence that stopped — and every undated item also takes fetch time as
+// its timestamp, so reading that as dormancy would hand one malformed
+// feed max boost × max recency on every render, forever. Such feeds are
+// left out of the corpus median too, exactly like an unobserved feed: a
+// rate that was never reported is not a zero to average in. The dormant
+// 5.0 stays for feeds that showed a cadence and went quiet.
 func (f *File) Weights(configured []string, now time.Time) map[string]float64 {
 	byURL := make(map[string]Feed, len(f.Feeds))
 	for _, fd := range f.Feeds {
@@ -244,7 +273,7 @@ func (f *File) Weights(configured []string, now time.Time) map[string]float64 {
 	}
 	rates := make([]float64, 0, len(configured))
 	for _, u := range configured {
-		if fd, ok := byURL[u]; ok {
+		if fd, ok := byURL[u]; ok && fd.SeenDated {
 			rates = append(rates, rateOf(fd))
 		}
 	}
@@ -255,7 +284,7 @@ func (f *File) Weights(configured []string, now time.Time) map[string]float64 {
 	out := make(map[string]float64, len(configured))
 	for _, u := range configured {
 		fd, ok := byURL[u]
-		if !ok || med == 0 {
+		if !ok || !fd.SeenDated || med == 0 {
 			out[u] = 1.0
 			continue
 		}
