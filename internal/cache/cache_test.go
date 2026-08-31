@@ -208,3 +208,40 @@ func TestRead_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestRead_RejectsV1Schema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	v1 := []byte(`{"version": 1, "cached_by_version": "0.6.0", "fetched_at": "2026-08-01T00:00:00Z", "stories": []}`)
+	if err := os.WriteFile(path, v1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := cache.Read(path)
+	if !errors.Is(err, cache.ErrSchemaVersion) {
+		t.Errorf("Read(v1 cache) error = %v, want ErrSchemaVersion (v1 caches predate Summary/Feed and must refetch)", err)
+	}
+}
+
+func TestWriteRead_RoundTripsSummaryAndFeed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feed.json")
+	in := &cache.File{
+		Version: cache.SchemaVersion, CachedByVersion: "dev",
+		FetchedAt: time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC),
+		Stories: []fetch.Story{{
+			ID: "rss-1", Title: "T", URL: "https://example.com/a", Source: "following",
+			Summary: "a post about zig comptime", Feed: "https://example.com/feed.xml",
+			CreatedAt: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC), Tags: []string{},
+		}},
+	}
+	if err := cache.Write(path, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cache.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Stories[0].Summary != in.Stories[0].Summary || got.Stories[0].Feed != in.Stories[0].Feed {
+		t.Errorf("round-trip lost fields: got %+v", got.Stories[0])
+	}
+}

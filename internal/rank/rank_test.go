@@ -327,6 +327,29 @@ func TestSelect_PoolSizeCap_Rank10CanBePicked(t *testing.T) {
 	}
 }
 
+func TestMatchesAnyTopic_SummaryAndHyphens(t *testing.T) {
+	cases := []struct {
+		name   string
+		story  fetch.Story
+		topics []string
+		want   bool
+	}{
+		{"summary token matches", fetch.Story{Title: "Weekly notes", Summary: "mostly about wasm this week"}, []string{"wasm"}, true},
+		{"summary substring does not false-match tokens", fetch.Story{Title: "x", Summary: "wasm"}, []string{"as"}, false},
+		{"hyphenated topic matches spaced text", fetch.Story{Title: "Notes on machine learning at scale"}, []string{"machine-learning"}, true},
+		{"spaced topic matches hyphenated text", fetch.Story{Title: "A machine-learning retrospective"}, []string{"machine learning"}, true},
+		{"hyphenated tag matches spaced topic", fetch.Story{Title: "x", Tags: []string{"machine-learning"}}, []string{"machine learning"}, true},
+		{"no match without any surface hit", fetch.Story{Title: "Databases", Summary: "postgres tips"}, []string{"rust"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchesAnyTopic(tc.story, tc.topics); got != tc.want {
+				t.Errorf("matchesAnyTopic(%+v, %v) = %v, want %v", tc.story, tc.topics, got, tc.want)
+			}
+		})
+	}
+}
+
 func fmtID(i int) string {
 	return "s-" + string(rune('a'+i%26)) + string(rune('0'+i/10))
 }

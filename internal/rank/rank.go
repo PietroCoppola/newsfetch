@@ -67,14 +67,15 @@ const (
 //	score = (points / (age_hours + ageOffsetHours)^gravityExponent) * topic_multiplier
 //
 // topic_multiplier is [topicMatchMultiplier] when any configured topic
-// matches the story's matching surface (title plus tags), else 1.0. M4
+// matches the story's matching surface (title, tags, and summary), else 1.0. M4
 // widened "matches the title" to "matches the title or any tag" so
 // source-provided tags from Lobste.rs (and future tagged sources)
 // contribute to topic relevance without per-source branches in the
-// ranker. The boost therefore fires on signals invisible to the user
-// (tags), which is intentional — the cleaner semantic is "topic matched
-// any of the story's relevance signals", and HN stories carry empty
-// Tags so their behaviour is unchanged.
+// ranker. M5 extends the surface to summary to improve feed coverage.
+// The boost therefore fires on signals invisible to the user (tags, summary),
+// which is intentional — the cleaner semantic is "topic matched any of the
+// story's relevance signals", and HN stories carry empty Tags and Summary so
+// their behaviour is unchanged.
 func Score(s fetch.Story, topics []string, now time.Time) float64 {
 	ageHours := now.Sub(s.CreatedAt).Hours()
 	if ageHours < 0 {
@@ -88,36 +89,44 @@ func Score(s fetch.Story, topics []string, now time.Time) float64 {
 }
 
 // matchesAnyTopic reports whether any topic matches the story's matching
-// surface, where the surface is the title joined with the tags by a
-// newline separator. The newline:
+// surface, where the surface is the title joined with tags and summary by
+// newline separators, with hyphens normalised to spaces. The newline:
 //
 //   - is a non-word character so tokenize splits cleanly on it;
 //   - cannot legitimately appear in a topic string the user typed, so a
 //     multi-word topic substring search will never match across the
-//     title|tag seam (preventing e.g. topic "machine learning" matching
-//     a story with title ending in "machine" and a tag "learning").
+//     title|tag|summary seams (preventing e.g. topic "machine learning"
+//     matching a story with title ending in "machine" and a tag "learning").
 //
-// Single-word topic (no whitespace): tokenize the surface and require an
-// exact token match. This is what makes topic "as" not match "wasm" —
-// "wasm" is a single token, not "w" + "as" + "m".
+// Hyphens in both topics and the surface normalise to spaces before matching,
+// so topic "machine-learning" matches text containing "machine learning", and
+// vice versa.
 //
-// Multi-word topic (contains whitespace, e.g. "machine learning"): case-
-// insensitive substring match against the lowercased surface. Multi-word
-// tags are uncommon in practice but if one appears (e.g. Lobsters tag
-// "open source") the tokenizer treats it as multiple terms, which gives
-// the right answer for single-word topics matching either word.
+// Single-word topic (no whitespace after normalization): tokenize the surface
+// and require an exact token match. This is what makes topic "as" not match
+// "wasm" — "wasm" is a single token, not "w" + "as" + "m".
+//
+// Multi-word topic (contains whitespace after normalization, e.g.
+// "machine learning"): case-insensitive substring match against the lowercased
+// surface. Multi-word tags are uncommon in practice but if one appears (e.g.
+// Lobsters tag "open source") the tokenizer treats it as multiple terms, which
+// gives the right answer for single-word topics matching either word.
 func matchesAnyTopic(s fetch.Story, topics []string) bool {
 	if len(topics) == 0 {
 		return false
 	}
 	surface := s.Title
 	if len(s.Tags) > 0 {
-		surface = s.Title + "\n" + strings.Join(s.Tags, "\n")
+		surface = surface + "\n" + strings.Join(s.Tags, "\n")
 	}
+	if s.Summary != "" {
+		surface = surface + "\n" + s.Summary
+	}
+	surface = strings.ReplaceAll(surface, "-", " ")
 	surfaceLower := strings.ToLower(surface)
 	var tokens []string // lazy — only built when a single-word topic appears
 	for _, t := range topics {
-		t = strings.TrimSpace(t)
+		t = strings.TrimSpace(strings.ReplaceAll(t, "-", " "))
 		if t == "" {
 			continue
 		}
