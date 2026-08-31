@@ -1,6 +1,7 @@
 package rank
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 	"time"
@@ -347,6 +348,21 @@ func TestMatchesAnyTopic_SummaryAndHyphens(t *testing.T) {
 				t.Errorf("matchesAnyTopic(%+v, %v) = %v, want %v", tc.story, tc.topics, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestScore_FollowingUnitPopularity(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	feedStory := fetch.Story{Feed: "https://x/feed", Points: 0, CreatedAt: now.Add(-2 * time.Hour)}
+	// Unit popularity over (2h age + 2h offset)^1.8 — the design's
+	// following formula is recency × cadence × topic, no points term.
+	want := 1.0 / math.Pow(4, 1.8)
+	if got := Score(feedStory, nil, now); math.Abs(got-want) > 1e-12 {
+		t.Errorf("Score(feed story) = %v, want %v (unit popularity, not Points/decay = 0)", got, want)
+	}
+	agg := fetch.Story{Points: 0, CreatedAt: now.Add(-2 * time.Hour)}
+	if got := Score(agg, nil, now); got != 0 {
+		t.Errorf("Score(zero-point aggregator story) = %v, want 0 (aggregators unchanged)", got)
 	}
 }
 

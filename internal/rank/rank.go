@@ -66,6 +66,9 @@ const (
 //
 //	score = (points / (age_hours + ageOffsetHours)^gravityExponent) * topic_multiplier
 //
+// For feed-attributed stories (Story.Feed != ""), points is 1.0 instead
+// of Story.Points (see addendum §11).
+//
 // topic_multiplier is [topicMatchMultiplier] when any configured topic
 // matches the story's matching surface (title, tags, and summary), else 1.0. M4
 // widened "matches the title" to "matches the title or any tag" so
@@ -81,11 +84,31 @@ func Score(s fetch.Story, topics []string, now time.Time) float64 {
 	if ageHours < 0 {
 		ageHours = 0
 	}
-	base := float64(s.Points) / math.Pow(ageHours+ageOffsetHours, gravityExponent)
+	pop := float64(s.Points)
+	if s.Feed != "" {
+		// Feed-attributed (following) stories carry no popularity
+		// signal; the design's formula is recency × cadence × topic
+		// (addendum §11), so the numerator is unit. Cadence applies at
+		// selection time via Options.FeedWeights. Pools never rank
+		// cross-pool, so this never competes with points-based scores.
+		pop = 1.0
+	}
+	base := pop / math.Pow(ageHours+ageOffsetHours, gravityExponent)
 	if matchesAnyTopic(s, topics) {
 		return base * topicMatchMultiplier
 	}
 	return base
+}
+
+// effectiveScore is Score with the per-feed cadence multiplier applied.
+func effectiveScore(s fetch.Story, opts Options) float64 {
+	w := Score(s, opts.Topics, opts.Now)
+	if s.Feed != "" {
+		if fw, ok := opts.FeedWeights[s.Feed]; ok {
+			w *= fw
+		}
+	}
+	return w
 }
 
 // matchesAnyTopic reports whether any topic matches the story's matching
@@ -170,11 +193,15 @@ func tokenize(s string) []string {
 }
 
 // Options carries per-invocation selection parameters. PoolSize <= 0 uses
-// defaults.RankPoolSize.
+// defaults.RankPoolSize. FeedWeights, when non-nil, multiplies a story's
+// score by the entry keyed on Story.Feed — the following pool's cadence
+// weighting (see feedstate.Weights); stories with no Feed or no entry
+// are untouched, so aggregator pools pass nil and nothing changes.
 type Options struct {
-	Topics   []string
-	Now      time.Time
-	PoolSize int
+	Topics      []string
+	Now         time.Time
+	PoolSize    int
+	FeedWeights map[string]float64
 }
 
 // Select scores every story in stories, keeps the top PoolSize candidates,
@@ -199,7 +226,7 @@ func Select(stories []fetch.Story, opts Options, rng *rand.Rand) (fetch.Story, e
 	}
 	all := make([]scored, len(stories))
 	for i, s := range stories {
-		all[i] = scored{s: s, w: Score(s, opts.Topics, opts.Now)}
+		all[i] = scored{s: s, w: effectiveScore(s, opts)}
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].w > all[j].w })
 	if len(all) > pool {

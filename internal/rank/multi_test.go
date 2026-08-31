@@ -134,6 +134,48 @@ func mustSelectN(t *testing.T, stories []fetch.Story, n int, opts rank.Options, 
 	return got
 }
 
+func TestSelectN_FeedWeightsShiftSelection(t *testing.T) {
+	now := refNow
+	// Identical raw scores: zero points (unit popularity), same age.
+	stories := []fetch.Story{
+		{ID: "busy", URL: "https://busy.com/1", Feed: "https://busy.com/feed", CreatedAt: now.Add(-time.Hour)},
+		{ID: "rare", URL: "https://rare.com/1", Feed: "https://rare.com/feed", CreatedAt: now.Add(-time.Hour)},
+	}
+	opts := rank.Options{Now: now, PoolSize: 2, FeedWeights: map[string]float64{
+		"https://busy.com/feed": 0.2,
+		"https://rare.com/feed": 5.0,
+	}}
+	// 25x weight ratio → rare's share is 25/26 ≈ 0.96. Across 50 seeds,
+	// rare must win the overwhelming majority; a missing multiplier OR
+	// all-zero scores yields ~50/50 and fails decisively.
+	rareWins := 0
+	for seed := int64(0); seed < 50; seed++ {
+		got := mustSelectN(t, stories, 1, opts, rand.New(rand.NewSource(seed)))
+		if got[0].ID == "rare" {
+			rareWins++
+		}
+	}
+	if rareWins < 40 {
+		t.Errorf("rare won %d/50 with a 25x weight advantage; want >= 40", rareWins)
+	}
+}
+
+func TestSelectN_NoFeedWeightIsNeutral(t *testing.T) {
+	now := refNow
+	stories := []fetch.Story{
+		{ID: "a", URL: "https://a.com/1", Points: 1000, CreatedAt: now.Add(-time.Hour)},
+		{ID: "b", URL: "https://b.com/1", Points: 10, CreatedAt: now.Add(-time.Hour)},
+	}
+	// Weights present but for other feeds: aggregator stories (Feed "")
+	// and unmapped feeds are untouched — the dominant story still wins
+	// under the deterministic seed-2 hero pick.
+	opts := rank.Options{Now: now, PoolSize: 2, FeedWeights: map[string]float64{"https://other/feed": 5.0}}
+	got := mustSelectN(t, stories, 1, opts, rand.New(rand.NewSource(2)))
+	if got[0].ID != "a" {
+		t.Errorf("hero = %s, want a (weights must not touch unmapped stories)", got[0].ID)
+	}
+}
+
 func makeStories(n int) []fetch.Story {
 	out := make([]fetch.Story, n)
 	for i := 0; i < n; i++ {
