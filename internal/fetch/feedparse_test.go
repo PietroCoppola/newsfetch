@@ -111,6 +111,26 @@ func TestParseFeed_Edges(t *testing.T) {
 	}
 }
 
+func TestParseFeed_BOMPrefix(t *testing.T) {
+	// Verify BOM prefix is stripped and parsing succeeds with correct content,
+	// matching the behavior of the same fixture without BOM.
+	items, err := parseFeed([]byte("\xef\xbb\xbf" + rssFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Errorf("item count = %d, want 2", len(items))
+	}
+	if len(items) > 0 {
+		if items[0].Title != "First post" {
+			t.Errorf("first item Title = %q, want First post", items[0].Title)
+		}
+		if items[0].URL != "https://example.com/first" {
+			t.Errorf("first item URL = %q, want https://example.com/first", items[0].URL)
+		}
+	}
+}
+
 func TestParseFeed_EscapedAngleBracketsSurviveStrip(t *testing.T) {
 	// The XML decoder turns &lt;/&gt; into literal angle brackets before
 	// stripTags runs, so plain-text comparisons must not be eaten as

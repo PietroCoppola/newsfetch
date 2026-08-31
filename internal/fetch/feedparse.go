@@ -73,12 +73,33 @@ type atomPerson struct {
 // same posture as RDF). Items missing a title or URL are silently
 // dropped; an unparseable date keeps the item with HasDate=false so the
 // caller can substitute fetch time. Malformed XML fails the whole feed —
-// no partial salvage.
+// no partial salvage. The root element name is examined once to dispatch
+// to the correct format parser.
 func parseFeed(data []byte) ([]feedItem, error) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 
-	var rss rssDoc
-	if err := decodeStrictUTF8(data, &rss); err == nil && rss.XMLName.Local == "rss" {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.Strict = true
+
+	// Find the root StartElement to determine format.
+	var rootStart xml.StartElement
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("parse feed: %w", err)
+		}
+		if se, ok := t.(xml.StartElement); ok {
+			rootStart = se
+			break
+		}
+	}
+
+	switch rootStart.Name.Local {
+	case "rss":
+		var rss rssDoc
+		if err := dec.DecodeElement(&rss, &rootStart); err != nil {
+			return nil, fmt.Errorf("parse feed: %w", err)
+		}
 		items := make([]feedItem, 0, len(rss.Items))
 		for _, it := range rss.Items {
 			author := it.Creator
@@ -91,10 +112,12 @@ func parseFeed(data []byte) ([]feedItem, error) {
 			}
 		}
 		return items, nil
-	}
 
-	var atom atomDoc
-	if err := decodeStrictUTF8(data, &atom); err == nil && atom.XMLName.Local == "feed" {
+	case "feed":
+		var atom atomDoc
+		if err := dec.DecodeElement(&atom, &rootStart); err != nil {
+			return nil, fmt.Errorf("parse feed: %w", err)
+		}
 		items := make([]feedItem, 0, len(atom.Entries))
 		for _, e := range atom.Entries {
 			date := e.Published
@@ -117,22 +140,10 @@ func parseFeed(data []byte) ([]feedItem, error) {
 			}
 		}
 		return items, nil
-	}
 
-	// Neither decode produced a recognised root: report the underlying
-	// XML error if there was one, else the format mismatch.
-	if err := decodeStrictUTF8(data, &rss); err != nil {
-		return nil, fmt.Errorf("parse feed: %w", err)
+	default:
+		return nil, errors.New("parse feed: document is neither RSS 2.0 nor Atom")
 	}
-	return nil, errors.New("parse feed: document is neither RSS 2.0 nor Atom")
-}
-
-// decodeStrictUTF8 unmarshals without a CharsetReader, so any non-UTF-8
-// encoding declaration surfaces as an error rather than mojibake.
-func decodeStrictUTF8(data []byte, v any) error {
-	dec := xml.NewDecoder(bytes.NewReader(data))
-	dec.Strict = true
-	return dec.Decode(v)
 }
 
 // buildItem applies the extraction contract: title and URL required
