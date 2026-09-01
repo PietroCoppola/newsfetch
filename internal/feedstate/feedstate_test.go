@@ -511,6 +511,63 @@ func TestWeights_OnceDatedFeedStillEarnsDormantBoost(t *testing.T) {
 	}
 }
 
+// TestWeights_NotModifiedRetainsDocumentShape pins the retention of the
+// two LastDoc counts across a 304, which is what lets the eligibility rule
+// keep telling a quiet document from an undated one when the fetch brings
+// back no document at all.
+//
+// The sequence has to be exactly this one to discriminate. Take the
+// obvious probe — dated, then a 304 — and zeroing the counts on the 304
+// would still answer 5.0, because LastDocItems == 0 with EverDated set
+// reads as "genuinely quiet". The only sequence where the two outcomes
+// differ is a NON-EMPTY undated document behind the 304: it must stay
+// neutral, and a regression that dropped the counts would flip it to the
+// dormant 5.0 on the strength of the historical latch alone.
+func TestWeights_NotModifiedRetainsDocumentShape(t *testing.T) {
+	now := refNow()
+	path := tmp(t)
+	writeAt := now.Add(-8 * week) // full confidence by `now`
+	const probe, anchor = "https://probe/feed", "https://anchor/feed"
+	cfg := []string{probe, anchor}
+
+	// 200 with a dated item: latches EverDated.
+	if err := feedstate.Update(path, cfg, []feedstate.Observation{
+		{URL: probe, PubDates: []time.Time{writeAt.Add(-time.Hour)}, Items: 1, DatesKnown: true},
+		{URL: anchor, PubDates: datesWithin(4), Items: 4, DatesKnown: true},
+	}, writeAt); err != nil {
+		t.Fatal(err)
+	}
+	// 200 still shipping items, none of whose dates parse: no signal.
+	if err := feedstate.Update(path, cfg, []feedstate.Observation{
+		{URL: probe, Items: 3, DatesKnown: true},
+	}, writeAt.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// 304: no document, so the stored shape is all there is to go on.
+	if err := feedstate.Update(path, cfg, []feedstate.Observation{
+		{URL: probe, DatesKnown: false},
+	}, writeAt.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := feedstate.Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range f.Feeds {
+		if fd.URL != probe {
+			continue
+		}
+		if fd.LastDocItems != 3 || fd.LastDocDated != 0 {
+			t.Errorf("after the 304: LastDocItems=%d LastDocDated=%d, want 3 and 0 (a 304 keeps the last document's shape)",
+				fd.LastDocItems, fd.LastDocDated)
+		}
+	}
+	if got := f.Weights(cfg, now)[probe]; math.Abs(got-1.0) > 1e-9 {
+		t.Errorf("probe = %v, want neutral 1.0 (a 304 over an undated document must not read as dormancy)", got)
+	}
+}
+
 func TestRead_CorruptErrors(t *testing.T) {
 	path := tmp(t)
 	if err := os.WriteFile(path, []byte("{nope"), 0o644); err != nil {
