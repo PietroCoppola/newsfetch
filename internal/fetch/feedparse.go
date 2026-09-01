@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"strings"
 	"time"
 )
@@ -83,8 +84,9 @@ type atomText struct {
 // same posture as RDF). Items missing a title or URL are silently
 // dropped; an unparseable date keeps the item with HasDate=false so the
 // caller can substitute fetch time. Malformed XML fails the whole feed —
-// no partial salvage. The root element name is examined once to dispatch
-// to the correct format parser.
+// no partial salvage, and that includes anything but XML's legal Misc*
+// epilogue after the root element (see [checkEpilogue]). The root element
+// name is examined once to dispatch to the correct format parser.
 //
 // One rule governs every text field on both paths: decode it as a SLICE
 // and take the first non-empty trimmed value. encoding/xml matches child
@@ -138,6 +140,9 @@ func parseFeed(data []byte) ([]feedItem, error) {
 				items = append(items, item)
 			}
 		}
+		if err := checkEpilogue(dec); err != nil {
+			return nil, err
+		}
 		return items, nil
 
 	case "feed":
@@ -170,10 +175,45 @@ func parseFeed(data []byte) ([]feedItem, error) {
 				items = append(items, item)
 			}
 		}
+		if err := checkEpilogue(dec); err != nil {
+			return nil, err
+		}
 		return items, nil
 
 	default:
 		return nil, errors.New("parse feed: document is neither RSS 2.0 nor Atom")
+	}
+}
+
+// checkEpilogue drains the decoder past the root element to EOF and
+// rejects anything XML does not allow there. DecodeElement returns as
+// soon as the root subtree closes and encoding/xml never validates the
+// remainder, so without this a valid root followed by garbage — or by a
+// whole second document — parses clean, contradicting parseFeed's
+// "malformed XML fails the whole feed" contract.
+//
+// Only the Misc* epilogue is legal: whitespace, comments, processing
+// instructions. Rejecting the first non-EOF token outright would fail
+// every feed that ends with a newline, which is most of them.
+func checkEpilogue(dec *xml.Decoder) error {
+	for {
+		t, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("parse feed: after root element: %w", err)
+		}
+		switch tok := t.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(tok)) != "" {
+				return errors.New("parse feed: unexpected text after root element")
+			}
+		case xml.Comment, xml.ProcInst, xml.Directive:
+			// legal epilogue
+		default:
+			return fmt.Errorf("parse feed: unexpected %T after root element", t)
+		}
 	}
 }
 

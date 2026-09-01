@@ -111,6 +111,41 @@ func TestParseFeed_Edges(t *testing.T) {
 	}
 }
 
+func TestParseFeed_TrailingContentAfterRoot(t *testing.T) {
+	// DecodeElement stops at the end of the root subtree and encoding/xml
+	// never validates what follows, so a valid root with anything bolted
+	// onto it parsed clean — contradicting the "malformed XML fails the
+	// whole feed" contract, and silently swallowing a second document.
+	//
+	// Rejecting the first non-EOF token is NOT the fix: XML's Misc*
+	// epilogue legally allows whitespace, comments and processing
+	// instructions after the root, and real feeds routinely end with a
+	// newline.
+	const root = `<rss version="2.0"><channel><item><title>t</title><link>https://e.com/x</link></item></channel></rss>`
+	cases := []struct {
+		name    string
+		trailer string
+		wantErr bool
+	}{
+		{"unterminated junk", `<junk`, true},
+		{"a second complete root", root, true},
+		{"stray text", "stray words", true},
+		{"trailing whitespace and a comment", "\n  <!-- built by something -->\n", false},
+		{"a processing instruction", "\n<?xml-stylesheet href=\"feed.xsl\"?>\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := parseFeed([]byte(root + tc.trailer))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseFeed error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && len(items) != 1 {
+				t.Errorf("items = %d, want the root's own item still parsed", len(items))
+			}
+		})
+	}
+}
+
 func TestParseFeed_BOMPrefix(t *testing.T) {
 	// Verify BOM prefix is stripped and parsing succeeds with correct content,
 	// matching the behavior of the same fixture without BOM.
