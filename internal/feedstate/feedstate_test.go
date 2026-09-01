@@ -12,19 +12,23 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/feedstate"
 )
 
-var now = time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-
 const week = 7 * 24 * time.Hour
+
+// refNow is the fixed instant every case below is written against. A
+// function rather than a package-level var: the project bans global
+// mutable state in internal packages, and a shared var one test could
+// reassign would couple every other test to the order they run in.
+func refNow() time.Time { return time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC) }
 
 func tmp(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "feeds.json") }
 
-// datesWithin returns n pubDates inside the 4-week window ending at now,
-// 1h apart. Spacing is irrelevant to the rate — only the in-window count
-// matters — so n dates mean a rate of n/4 items per week.
+// datesWithin returns n pubDates inside the 4-week window ending at
+// refNow(), 1h apart. Spacing is irrelevant to the rate — only the
+// in-window count matters — so n dates mean a rate of n/4 items per week.
 func datesWithin(n int) []time.Time {
 	out := make([]time.Time, n)
 	for i := range out {
-		out[i] = now.Add(-time.Duration(i+1) * time.Hour)
+		out[i] = refNow().Add(-time.Duration(i+1) * time.Hour)
 	}
 	return out
 }
@@ -41,6 +45,7 @@ func TestPath_HonoursXDGStateHome(t *testing.T) {
 }
 
 func TestUpdate_UpsertsGCsAndPrunes(t *testing.T) {
+	now := refNow()
 	path := tmp(t)
 	// a's second date is 5 weeks old: write-prune must drop it.
 	if err := feedstate.Update(path, []string{"https://a/feed", "https://b/feed"}, []feedstate.Observation{
@@ -83,6 +88,7 @@ func TestUpdate_UpsertsGCsAndPrunes(t *testing.T) {
 }
 
 func TestUpdate_ConcurrentWritersRetainAll(t *testing.T) {
+	now := refNow()
 	path := tmp(t)
 	urls := make([]string, 20)
 	for i := range urls {
@@ -115,6 +121,7 @@ func TestUpdate_ConcurrentWritersRetainAll(t *testing.T) {
 // turn on the flag itself are TestWeights_NeverDatedFeedIsNeutralNotDormant
 // and TestWeights_OnceDatedFeedStillEarnsDormantBoost.
 func TestWeights(t *testing.T) {
+	now := refNow()
 	old := now.Add(-8 * week) // 8 weeks: full confidence
 	expired := []time.Time{now.Add(-5 * week), now.Add(-6 * week), now.Add(-7 * week)}
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
@@ -152,6 +159,7 @@ func TestWeights(t *testing.T) {
 }
 
 func TestWeights_WindowBoundaries(t *testing.T) {
+	now := refNow()
 	old := now.Add(-8 * week)
 	cases := []struct {
 		name      string
@@ -181,6 +189,7 @@ func TestWeights_WindowBoundaries(t *testing.T) {
 }
 
 func TestWeights_ZeroMedianFallsBackToNonzero(t *testing.T) {
+	now := refNow()
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
 		{URL: "d1", FirstSeen: old, ObservedAt: now, SeenDated: true},                                            // 0/wk
@@ -202,6 +211,7 @@ func TestWeights_ZeroMedianFallsBackToNonzero(t *testing.T) {
 }
 
 func TestWeights_AllDormantNeutral(t *testing.T) {
+	now := refNow()
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
 		{URL: "d1", FirstSeen: old, ObservedAt: now, SeenDated: true},
@@ -216,6 +226,7 @@ func TestWeights_AllDormantNeutral(t *testing.T) {
 }
 
 func TestWeights_ColdStartBlend(t *testing.T) {
+	now := refNow()
 	twoWeeks := now.Add(-2 * week) // confidence 0.5
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
@@ -231,6 +242,7 @@ func TestWeights_ColdStartBlend(t *testing.T) {
 }
 
 func TestWeights_FutureFirstSeenClampsToNeutral(t *testing.T) {
+	now := refNow()
 	old := now.Add(-8 * week)
 	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
 		{URL: "skewed", FirstSeen: now.Add(week), PubDates: datesWithin(16), ObservedAt: now, SeenDated: true},
@@ -245,6 +257,7 @@ func TestWeights_FutureFirstSeenClampsToNeutral(t *testing.T) {
 }
 
 func TestWeights_RollsAcrossNotModified(t *testing.T) {
+	now := refNow()
 	path := tmp(t)
 	later := now.Add(6 * week)
 	cfg := []string{"https://a/feed", "https://b/feed"}
@@ -289,6 +302,7 @@ func TestWeights_RollsAcrossNotModified(t *testing.T) {
 // own headers and back-fills the ones it sent when a 304 omits them, so
 // what arrives here is either newer than the stored pair or equal to it.
 func TestUpdate_ValidatorsFollowTheObservation(t *testing.T) {
+	now := refNow()
 	const url = "https://a/feed"
 	const firstLM = "Mon, 24 Aug 2026 10:00:00 GMT"
 	const secondLM = "Tue, 25 Aug 2026 10:00:00 GMT"
@@ -363,6 +377,7 @@ func TestUpdate_ValidatorsFollowTheObservation(t *testing.T) {
 }
 
 func TestWeights_NeverDatedFeedIsNeutralNotDormant(t *testing.T) {
+	now := refNow()
 	// A feed whose dates all fail to parse reports zero pubDates, which was
 	// indistinguishable from "published nothing in four weeks" and earned
 	// the max dormant boost — while every undated item also takes fetch
@@ -395,6 +410,7 @@ func TestWeights_NeverDatedFeedIsNeutralNotDormant(t *testing.T) {
 }
 
 func TestWeights_OnceDatedFeedStillEarnsDormantBoost(t *testing.T) {
+	now := refNow()
 	// The other half of the rule: the 5.0 exists for a feed that showed a
 	// cadence and went quiet. The flag is recorded on the first pass and
 	// must survive the round-trip through feeds.json — and must not be
