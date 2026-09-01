@@ -84,9 +84,10 @@ type atomText struct {
 // same posture as RDF). Items missing a title or URL are silently
 // dropped; an unparseable date keeps the item with HasDate=false so the
 // caller can substitute fetch time. Malformed XML fails the whole feed —
-// no partial salvage, and that includes anything but XML's legal Misc*
-// epilogue after the root element (see [checkEpilogue]). The root element
-// name is examined once to dispatch to the correct format parser.
+// no partial salvage, and that includes anything outside XML's legal
+// prolog before the root element (see [readPrologue]) or its Misc*
+// epilogue after it (see [checkEpilogue]). The root element name is
+// examined once to dispatch to the correct format parser.
 //
 // One rule governs every text field on both paths: decode it as a SLICE
 // and take the first non-empty trimmed value. encoding/xml matches child
@@ -103,17 +104,9 @@ func parseFeed(data []byte) ([]feedItem, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = true
 
-	// Find the root StartElement to determine format.
-	var rootStart xml.StartElement
-	for {
-		t, err := dec.Token()
-		if err != nil {
-			return nil, fmt.Errorf("parse feed: %w", err)
-		}
-		if se, ok := t.(xml.StartElement); ok {
-			rootStart = se
-			break
-		}
+	rootStart, err := readPrologue(dec)
+	if err != nil {
+		return nil, err
 	}
 
 	switch rootStart.Name.Local {
@@ -185,6 +178,42 @@ func parseFeed(data []byte) ([]feedItem, error) {
 	}
 }
 
+// readPrologue advances the decoder to the root StartElement and returns
+// it, rejecting anything XML does not allow before a root. Skipping to the
+// first StartElement unconditionally would swallow a proxy or CDN error
+// page prepended to the feed body, contradicting parseFeed's "malformed
+// XML fails the whole feed" contract at the head of the document the same
+// way an unchecked epilogue does at the tail (see [checkEpilogue]).
+//
+// The prolog is `XMLDecl? Misc* (doctypedecl Misc*)?`: an XML declaration,
+// comments, processing instructions, whitespace and — unlike the epilogue
+// — a DOCTYPE directive. Real feeds ship all of them, so only non-
+// whitespace text and a stray end element are rejected here. Ordering
+// within the prolog is left to the decoder; the failure this guards
+// against is content that has no business in a prolog at all.
+func readPrologue(dec *xml.Decoder) (xml.StartElement, error) {
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return xml.StartElement{}, fmt.Errorf("parse feed: %w", err)
+		}
+		switch tok := t.(type) {
+		case xml.StartElement:
+			return tok, nil
+		case xml.CharData:
+			if strings.TrimSpace(string(tok)) != "" {
+				return xml.StartElement{}, errors.New("parse feed: unexpected text before root element")
+			}
+		case xml.Comment, xml.ProcInst, xml.Directive:
+			// legal prolog
+		default:
+			// An end element here is a syntax error the strict decoder
+			// already reports; this keeps the set closed either way.
+			return xml.StartElement{}, fmt.Errorf("parse feed: unexpected %T before root element", t)
+		}
+	}
+}
+
 // checkEpilogue drains the decoder past the root element to EOF and
 // rejects anything XML does not allow there. DecodeElement returns as
 // soon as the root subtree closes and encoding/xml never validates the
@@ -195,6 +224,11 @@ func parseFeed(data []byte) ([]feedItem, error) {
 // Only the Misc* epilogue is legal: whitespace, comments, processing
 // instructions. Rejecting the first non-EOF token outright would fail
 // every feed that ends with a newline, which is most of them.
+//
+// A DOCTYPE directive is prolog-only Misc and is rejected here even
+// though [readPrologue] accepts one, and so is the XML declaration, which
+// Go surfaces as an ordinary ProcInst with target "xml" — both after a
+// closed root mean a second document was concatenated onto this one.
 func checkEpilogue(dec *xml.Decoder) error {
 	for {
 		t, err := dec.Token()
@@ -209,7 +243,11 @@ func checkEpilogue(dec *xml.Decoder) error {
 			if strings.TrimSpace(string(tok)) != "" {
 				return errors.New("parse feed: unexpected text after root element")
 			}
-		case xml.Comment, xml.ProcInst, xml.Directive:
+		case xml.ProcInst:
+			if tok.Target == "xml" {
+				return errors.New("parse feed: xml declaration after root element")
+			}
+		case xml.Comment:
 			// legal epilogue
 		default:
 			return fmt.Errorf("parse feed: unexpected %T after root element", t)
