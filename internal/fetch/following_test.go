@@ -159,6 +159,13 @@ func TestFollowing_FetchFeeds_FanOut(t *testing.T) {
 	if len(rssRes.ItemDates) != 3 {
 		t.Fatalf("RSS ItemDates = %v, want exactly 3 (all dated items, uncapped by MaxItems)", rssRes.ItemDates)
 	}
+	// Items counts the same scope as ItemDates — every item that survived
+	// to Story mapping, before the MaxItems cap — including the undated
+	// one. feedstate needs the total to tell "this document dated nothing"
+	// from "this document held nothing".
+	if rssRes.Items != 4 {
+		t.Errorf("RSS Items = %d, want 4 (3 dated + 1 undated, uncapped by MaxItems=2)", rssRes.Items)
+	}
 	// Count occurrences rather than just membership: a bug that emitted
 	// [newest, newest, newest] would still pass a pure membership check
 	// against len==3, so pin each expected date to exactly one occurrence.
@@ -227,6 +234,9 @@ func TestFollowing_ConditionalGET(t *testing.T) {
 	}
 	if res.ItemDates != nil {
 		t.Errorf("ItemDates = %v, want nil on a 304", res.ItemDates)
+	}
+	if res.Items != 0 {
+		t.Errorf("Items = %d, want 0 on a 304 (no document was fetched)", res.Items)
 	}
 	if res.ETag != `"tag2"` {
 		t.Errorf("ETag = %q, want the server's refreshed %q", res.ETag, `"tag2"`)
@@ -449,6 +459,11 @@ func TestFollowing_ItemLinksResolvedAgainstFeedURL(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	// An item the URL guard dropped is not an item, so it must not inflate
+	// the count feedstate reads as "this document carried items".
+	if results[0].Items != 2 {
+		t.Errorf("Items = %d, want 2 (the javascript: item is not an item)", results[0].Items)
 	}
 }
 

@@ -36,7 +36,14 @@ type FeedResult struct {
 	// for the pool. Items the parser rejected (no title, no link) and
 	// items whose link is not an absolute http(s) URL are not items, so
 	// they do not count. Nil when NotModified is true.
-	ItemDates    []time.Time
+	ItemDates []time.Time
+	// Items is how many items the document carried in total, dated or
+	// not, over exactly ItemDates' scope: after the URL guard, before the
+	// MaxItems cap. feedstate needs the total to tell a document that
+	// dated nothing (no cadence signal — those items also take fetch time
+	// as their timestamp) from one that held nothing (a quiet feed, which
+	// keeps its dormant boost). Zero when NotModified is true.
+	Items        int
 	ETag         string
 	LastModified string
 	// NotModified is true on a 304: a successful, unchanged fetch. No
@@ -211,6 +218,7 @@ func (f *Following) fetchOne(ctx context.Context, spec FeedSpec) (FeedResult, []
 	items = resolved
 
 	fetchedAt := time.Now().UTC()
+	res.Items = len(items)
 	for _, it := range items {
 		if it.HasDate {
 			res.ItemDates = append(res.ItemDates, it.Published)
