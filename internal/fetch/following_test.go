@@ -467,6 +467,109 @@ func TestFollowing_ItemLinksResolvedAgainstFeedURL(t *testing.T) {
 	}
 }
 
+func TestFollowing_ItemLinksResolveAgainstTheRedirectedURL(t *testing.T) {
+	// The client follows redirects, so the document that arrives is the one
+	// at the FINAL URL, and its relative links are relative to THAT. The
+	// redirect crosses into a different directory, which is what separates
+	// the two bases: against the configured /start, "post" resolves to
+	// /post; against the served /blog/feed.xml it resolves to /blog/post.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/blog/feed.xml", http.StatusFound)
+	})
+	mux.HandleFunc("/blog/feed.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, rssFeedXML(rssItemXML("Relative item", "post", "A relative link.", "")))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	configured := srv.URL + "/start"
+
+	f := &fetch.Following{Feeds: []fetch.FeedSpec{{URL: configured, MaxItems: 10}}}
+	stories, results, errs := f.FetchFeeds(context.Background())
+	if errs != nil {
+		t.Fatalf("errs = %v, want nil", errs)
+	}
+	if len(stories) != 1 {
+		t.Fatalf("len(stories) = %d, want 1: %v", len(stories), stories)
+	}
+	if want := srv.URL + "/blog/post"; stories[0].URL != want {
+		t.Errorf("story URL = %q, want %q (resolved against the post-redirect URL, not the configured one)", stories[0].URL, want)
+	}
+	// Only the resolution base moves. Identity stays the configured URL:
+	// that is what the config lists and what feedstate is keyed by.
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].URL != configured {
+		t.Errorf("FeedResult.URL = %q, want the configured %q", results[0].URL, configured)
+	}
+	if stories[0].Feed != configured {
+		t.Errorf("Story.Feed = %q, want the configured %q", stories[0].Feed, configured)
+	}
+}
+
+func TestFollowing_ItemURLGuard(t *testing.T) {
+	// Every link reaching Story.URL must be an absolute http(s) URL with a
+	// host. Checking the scheme alone is not enough: "http:post" and
+	// "https:///post" both carry an accepted scheme and no host at all,
+	// and become dead links whose NormalisedHost is empty — which silently
+	// disables the diversity host penalty.
+	cases := []struct {
+		name, link string
+		want       string // "" means the item must be dropped
+	}{
+		{"opaque http", "http:post", ""},
+		{"opaque https", "https:post", ""},
+		{"scheme and path but no authority", "http:/post", ""},
+		{"empty authority", "https:///post", ""},
+		{"port with no host", "https://:8080/x", ""},
+		{"non-http scheme", "javascript:alert(1)", ""},
+		{"root-relative", "/relative/post", "%s/relative/post"},
+		{"document-relative", "post.html", "%s/feed/post.html"},
+		{"protocol-relative", "//other.example/post", "http://other.example/post"},
+		{"already absolute", "https://example.com/post", "https://example.com/post"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Served from a subdirectory so a document-relative link has a
+			// directory to be relative to.
+			mux := http.NewServeMux()
+			mux.HandleFunc("/feed/rss.xml", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/xml")
+				fmt.Fprint(w, rssFeedXML(rssItemXML("Item", tc.link, "A summary.", "")))
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			f := &fetch.Following{Feeds: []fetch.FeedSpec{{URL: srv.URL + "/feed/rss.xml", MaxItems: 10}}}
+			stories, results, errs := f.FetchFeeds(context.Background())
+			if errs != nil {
+				t.Fatalf("errs = %v, want nil", errs)
+			}
+			want := tc.want
+			if strings.Contains(want, "%s") {
+				want = fmt.Sprintf(want, srv.URL)
+			}
+			if want == "" {
+				if len(stories) != 0 {
+					t.Fatalf("link %q produced %v, want the item dropped", tc.link, stories)
+				}
+				if results[0].Items != 0 {
+					t.Errorf("Items = %d, want 0 (a dropped link is not an item)", results[0].Items)
+				}
+				return
+			}
+			if len(stories) != 1 {
+				t.Fatalf("link %q produced %d stories, want 1", tc.link, len(stories))
+			}
+			if stories[0].URL != want {
+				t.Errorf("link %q resolved to %q, want %q", tc.link, stories[0].URL, want)
+			}
+		})
+	}
+}
+
 func TestFollowing_UserAgent(t *testing.T) {
 	var (
 		uaMu  sync.Mutex

@@ -195,10 +195,6 @@ func (f *Following) fetchOne(ctx context.Context, spec FeedSpec) (FeedResult, []
 	if err != nil {
 		return FeedResult{}, nil, fmt.Errorf("feed %s: %w", spec.URL, err)
 	}
-	base, err := url.Parse(spec.URL)
-	if err != nil {
-		return FeedResult{}, nil, fmt.Errorf("feed %s: parse feed url: %w", spec.URL, err)
-	}
 	// Item links may be relative — legal in Atom (RFC 4287 resolves them
 	// against the feed URL) and common in RSS too — so resolve them here,
 	// the only layer holding the base URL; the parser has none. Anything
@@ -206,6 +202,18 @@ func (f *Following) fetchOne(ctx context.Context, spec FeedSpec) (FeedResult, []
 	// dates included: a link the renderer cannot open is not an item, and
 	// a non-http URL blanks Story.NormalisedHost, silently disabling the
 	// diversity host penalty.
+	//
+	// The base is the FINAL URL after redirects, which http.Client records
+	// as resp.Request, not the configured one: a feed that redirects into
+	// another directory serves links relative to where the document
+	// actually came from, so resolving against the configured URL points
+	// them at the wrong directory. Only the base moves — FeedResult.URL
+	// and Story.Feed stay keyed by the configured URL, which is what the
+	// config lists and what feedstate stores.
+	base := req.URL
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
 	resolved := make([]feedItem, 0, len(items))
 	for _, it := range items {
 		abs, ok := resolveItemURL(base, it.URL)
@@ -252,8 +260,16 @@ func (f *Following) fetchOne(ctx context.Context, spec FeedSpec) (FeedResult, []
 	return res, stories, nil
 }
 
-// resolveItemURL resolves link against the feed's own URL and reports
-// whether the result is a usable absolute http(s) URL.
+// resolveItemURL resolves link against base and reports whether the
+// result is a usable absolute http(s) URL.
+//
+// An http(s) scheme is not on its own enough to be usable. "http:post" is
+// opaque and "https:///post" has an empty authority; both carry an
+// accepted scheme, resolve to no host at all, and reach the renderer as
+// dead links whose NormalisedHost is empty — which quietly turns off the
+// diversity host penalty for them. Hostname(), not Host: "https://:8080/x"
+// has a non-empty Host (the port) and no host name. The Opaque test is
+// redundant once a host name is required, but states the intent.
 func resolveItemURL(base *url.URL, link string) (string, bool) {
 	ref, err := url.Parse(link)
 	if err != nil {
@@ -261,6 +277,9 @@ func resolveItemURL(base *url.URL, link string) (string, bool) {
 	}
 	abs := base.ResolveReference(ref)
 	if abs.Scheme != "http" && abs.Scheme != "https" {
+		return "", false
+	}
+	if abs.Opaque != "" || abs.Hostname() == "" {
 		return "", false
 	}
 	return abs.String(), true
