@@ -121,7 +121,7 @@ func renderMultiBoxed(stories []fetch.Story, now time.Time, width int, marker Ti
 		divider = boxLeftTee + boxHoriz + boxDownTee + strings.Repeat(boxHoriz, width-4) + boxRightTee
 	}
 	var b strings.Builder
-	b.WriteString(boxTopLeft + horiz + boxTopRight + "\n")
+	b.WriteString(topBorder(width, "") + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(stories[0].Title, contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(metaLine(stories[0], now), contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(divider + "\n")
@@ -146,10 +146,9 @@ func heroBox(s fetch.Story, now time.Time, width int, withSpine bool) string {
 	if contentW < 1 {
 		contentW = 1
 	}
-	horiz := strings.Repeat(boxHoriz, width-2)
 	bottom := boxBotLeft + boxHoriz + boxDownTee + strings.Repeat(boxHoriz, width-4) + boxBotRight
 	var b strings.Builder
-	b.WriteString(boxTopLeft + horiz + boxTopRight + "\n")
+	b.WriteString(topBorder(width, "") + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(s.Title, contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(metaLine(s, now), contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(bottom + "\n")

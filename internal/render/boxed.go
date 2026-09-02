@@ -31,6 +31,14 @@ const (
 // argument is the reference point for the "X ago" relative timestamp so that
 // output is deterministic for tests.
 func Boxed(s fetch.Story, now time.Time, width int) string {
+	return boxedLabelled(s, now, width, "")
+}
+
+// boxedLabelled is [Boxed] with an optional pool label written into the top
+// border. It exists so the multi-pool stacker can label a box without
+// keeping a second copy of the panel body; [Boxed] is the empty-label case
+// and stays byte-for-byte what it always was.
+func boxedLabelled(s fetch.Story, now time.Time, width int, label string) string {
 	if width < minWidth {
 		width = minWidth
 	}
@@ -45,11 +53,27 @@ func Boxed(s fetch.Story, now time.Time, width int) string {
 	horiz := strings.Repeat(boxHoriz, width-2)
 
 	var b strings.Builder
-	b.WriteString(boxTopLeft + horiz + boxTopRight + "\n")
+	b.WriteString(topBorder(width, label) + "\n")
 	b.WriteString(boxVert + " " + padRight(title, contentWidth) + " " + boxVert + "\n")
 	b.WriteString(boxVert + " " + padRight(meta, contentWidth) + " " + boxVert + "\n")
 	b.WriteString(boxBotLeft + horiz + boxBotRight + "\n")
 	return b.String()
+}
+
+// topBorder builds a box's top edge, width columns wide, with no trailing
+// newline. Three call sites used to build this line inline, which is one
+// copy per box shape and three places for the label work to miss; this is
+// now the only place the edge is spelled out.
+//
+// The label argument is accepted but deliberately ignored for now: the
+// labelled branch arrives with the multi-pool header, and routing every
+// call site first keeps that change to one function instead of three.
+func topBorder(width int, label string) string {
+	n := width - 2
+	if n < 0 {
+		n = 0
+	}
+	return boxTopLeft + strings.Repeat(boxHoriz, n) + boxTopRight
 }
 
 // Fallback renders the neutral "no fresh news" message the caller passes in.
