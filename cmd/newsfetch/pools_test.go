@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -712,6 +715,16 @@ func TestAssemblePools_CrossPoolDuplicateRendersOnce(t *testing.T) {
 	}
 
 	cfg := poolTestCfg() // pool_order is following, then news
+	// The news pool is allowed BOTH its stories. That is what makes this
+	// test seed-independent: with the working set accumulating, the
+	// contested article is already taken by the time news selects, so news
+	// has exactly one candidate and can only ever return one story. Without
+	// it, news selects from two candidates and must return two, duplicate
+	// included. At count 1 the outcome instead rode on a weighted-random
+	// choice between the 500-point duplicate and the 400-point alternative,
+	// so a broken implementation escaped detection on roughly half the
+	// seeds — including the one this test pins.
+	cfg.Count = 2
 	seedPoolCache(t, "news", now.Add(-time.Minute), []fetch.Story{newsDup, newsOther})
 	seedPoolCache(t, "following", now.Add(-time.Minute), []fetch.Story{followingDup})
 
@@ -730,7 +743,7 @@ func TestAssemblePools_CrossPoolDuplicateRendersOnce(t *testing.T) {
 		t.Errorf("following pool = %+v, want it to keep the contested article (earlier in pool_order)", pools[0].Stories)
 	}
 	if len(pools[1].Stories) != 1 || pools[1].Stories[0].Title != "Only on Hacker News" {
-		t.Errorf("news pool = %+v, want its second-choice story", pools[1].Stories)
+		t.Errorf("news pool = %+v, want exactly its one uncontested story even though count is 2", pools[1].Stories)
 	}
 }
 
@@ -869,5 +882,126 @@ func TestWritePools_NothingToShowIsStyleAware(t *testing.T) {
 				t.Errorf("%s style with nothing to show\n got: %q\nwant: %q", style, buf.String(), want)
 			}
 		})
+	}
+}
+
+// TestAssemblePools_SecondPassSkipsPastEmptyPoolsToTheFirstThatYields
+// pins the fall-through half of R-31's second pass. The pass runs in
+// pool_order and stops at the first pool that YIELDS, which is not the
+// same as stopping at the first pool: a pool that read cleanly and held
+// nothing is still in the list, still first in pool_order, and still
+// cannot repeat anything. Stopping there would print the offline
+// fallback on a working install with a perfectly usable news cache.
+func TestAssemblePools_SecondPassSkipsPastEmptyPoolsToTheFirstThatYields(t *testing.T) {
+	isolateXDG(t)
+	captureSpawn(t)
+	now := time.Now().UTC()
+
+	cfg := poolTestCfg() // pool_order: following, then news
+	newsStories := poolTestStories(now, 2)
+	seen := map[string]struct{}{}
+	for _, s := range newsStories {
+		seen[s.Hash()] = struct{}{}
+	}
+	// Following refreshed to nothing; news holds only stories the user has
+	// already been shown. Pass one therefore selects nothing anywhere, and
+	// pass two has to walk past following to find the pool that can repeat.
+	seedPoolCache(t, "following", now.Add(-time.Minute), []fetch.Story{})
+	seedPoolCache(t, "news", now.Add(-time.Minute), newsStories)
+
+	pools, rendered, err := assemblePools(cfg, seen, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	if len(rendered) != 1 {
+		t.Fatalf("rendered %d stories, want 1 — a repeat from news beats the offline fallback", len(rendered))
+	}
+	got := map[string]int{}
+	for _, p := range pools {
+		got[p.Name] = len(p.Stories)
+	}
+	if got["following"] != 0 {
+		t.Errorf("following pool rendered %d stories, want 0 (it had none to repeat)", got["following"])
+	}
+	if got["news"] != 1 {
+		t.Errorf("news pool rendered %d stories, want 1 (the second pass must reach it)", got["news"])
+	}
+}
+
+// TestAssemblePools_EmptyNewsCacheStillTriggersTheColdFetch pins the
+// trigger on the news pool's synchronous cold-start fetch: it is
+// emptiness, not absence. A feed.json that read cleanly and held zero
+// stories has nothing to render, so keying the fetch on !present would
+// leave that user staring at the fallback until the detached refresh
+// happened to land. This is the pre-pool behaviour carried over
+// deliberately, and it is the one place emptiness and presence part ways
+// on purpose — R-36 governs the REFRESH decision, not this one.
+func TestAssemblePools_EmptyNewsCacheStillTriggersTheColdFetch(t *testing.T) {
+	isolateXDG(t)
+	captureSpawn(t)
+	ts := algoliaStub()
+	defer ts.Close()
+	swapHNSource(t, ts.URL)
+
+	now := time.Now().UTC()
+	cfg := poolTestCfg()
+	cfg.Pools = []string{"news"} // following inactive: one pool under test
+	// Present AND fresh AND empty — the state that separates the two rules.
+	seedPoolCache(t, "news", now.Add(-time.Minute), []fetch.Story{})
+
+	pools, rendered, err := assemblePools(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("got %d pools, want 1", len(pools))
+	}
+	if len(rendered) != 1 {
+		t.Fatalf("rendered %d stories, want 1 from the cold fetch", len(rendered))
+	}
+	if len(pools[0].Stories) != 1 {
+		t.Errorf("news pool rendered %d stories, want 1", len(pools[0].Stories))
+	}
+}
+
+// TestAssemblePools_OfflineColdStartAsksForABackgroundRefresh pins a
+// deliberate behaviour change against the pre-pool render path. There, a
+// cold cache plus a failed synchronous fetch printed the fallback and
+// spawned nothing. Here the missing cache marks the pool as needing a
+// refresh before the cold fetch is attempted, so a detached refresh goes
+// out even though this invocation renders nothing. That is the better
+// behaviour and it is intended: a briefly flaky network costs the user one
+// empty render instead of an empty render on every terminal open until a
+// stale-cache path happens to fire.
+func TestAssemblePools_OfflineColdStartAsksForABackgroundRefresh(t *testing.T) {
+	isolateXDG(t)
+	spawns := captureSpawn(t)
+	// A reachable upstream that has nothing to give: the fetch succeeds and
+	// yields zero stories, which is the same dead end as a failure without
+	// needing an error to be plumbed through the stub.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hits":[]}`)
+	}))
+	defer ts.Close()
+	swapHNSource(t, ts.URL)
+
+	now := time.Now().UTC()
+	cfg := poolTestCfg()
+	cfg.Pools = []string{"news"}
+	// No cache file at all.
+
+	pools, rendered, err := assemblePools(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	if len(pools) != 1 || len(pools[0].Stories) != 0 {
+		t.Errorf("news pool = %+v, want nothing to render", pools)
+	}
+	if len(rendered) != 0 {
+		t.Errorf("rendered %d stories, want 0", len(rendered))
+	}
+	if *spawns != 1 {
+		t.Errorf("spawned %d refreshes, want exactly 1 — an empty render must still leave the next one warm", *spawns)
 	}
 }
