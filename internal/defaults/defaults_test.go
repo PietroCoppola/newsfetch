@@ -52,3 +52,24 @@ func TestSources_ReturnsCopy(t *testing.T) {
 		t.Error("Sources shares its backing array; want a fresh copy per call")
 	}
 }
+
+// TestFeedBounds pins the ordering the four feed constants only mean
+// anything as a set: internal/feedstate caps a computed cadence weight at
+// MaxFeedWeight, and internal/config clamps a configured max_items into
+// [MinFeedItems, MaxFeedItems] and a configured weight into
+// (0, MaxFeedWeight]. An inverted pair would turn every clamp into a
+// rejection of every value, and nothing downstream re-checks the ordering.
+func TestFeedBounds(t *testing.T) {
+	if MinFeedItems < 1 {
+		t.Errorf("MinFeedItems = %d, want at least 1 (zero silently disables a feed the user configured)", MinFeedItems)
+	}
+	if MinFeedItems > DefaultFeedMaxItems {
+		t.Errorf("MinFeedItems = %d > DefaultFeedMaxItems = %d; the default must be a legal value", MinFeedItems, DefaultFeedMaxItems)
+	}
+	if DefaultFeedMaxItems > MaxFeedItems {
+		t.Errorf("DefaultFeedMaxItems = %d > MaxFeedItems = %d; the default must be a legal value", DefaultFeedMaxItems, MaxFeedItems)
+	}
+	if MaxFeedWeight <= 0 {
+		t.Errorf("MaxFeedWeight = %v, want a positive cap (weights multiply a score; a non-positive cap zeroes every feed)", MaxFeedWeight)
+	}
+}

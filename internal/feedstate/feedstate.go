@@ -24,6 +24,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 )
 
@@ -258,24 +259,19 @@ func (f *File) Validators(url string) (etag, lastModified string) {
 // zero median falls back to the median of the nonzero rates, and if
 // every rate is zero there is no signal and every weight is neutral 1.0
 // (addendum §13). computed = median/rate, with rate 0 (dormant) taking
-// the capped 5.0 instead of dividing by zero, and computed capped at
-// 5.0 before the blend. Cold start blends toward neutral: confidence =
-// clamp(age/4wk, 0, 1); w = conf*computed + (1-conf)*1.0 — so the
-// final weight sits in (0, 5.0] by construction, the same bound the
-// config gives manual weights.
+// the capped [defaults.MaxFeedWeight] instead of dividing by zero, and
+// computed capped at the same bound. That capped weight is then scaled by
+// the last document's date coverage (see [coverage]) — the evidence
+// discount — and only then does the cold start blend toward neutral:
+// confidence = clamp(age/4wk, 0, 1); w = conf*computed + (1-conf)*1.0.
+// The final weight therefore sits in (0, MaxFeedWeight], the same bound
+// the config gives manual weights.
 //
 // A feed with no observation is neutral, and so is a feed with no cadence
 // SIGNAL — see [hasCadenceSignal]. Signal-less feeds are left out of the
 // corpus median too, exactly like an unobserved feed: a rate that was
-// never reported is not a zero to average in. The dormant 5.0 stays for
+// never reported is not a zero to average in. The dormant boost stays for
 // feeds that showed a cadence and went quiet.
-//
-// Known gap, deliberately left for Part 2: a MIXED document — say one
-// dated item out of fifty, that one date out of window — clears the
-// signal test on the strength of its single date and still reaches 5.0.
-// Closing it needs a ratio or coverage threshold (what fraction of a
-// document must be dated before its dates are trusted), which is a design
-// decision with a constant to pick, not a bug fix.
 func (f *File) Weights(configured []string, now time.Time) map[string]float64 {
 	byURL := make(map[string]Feed, len(f.Feeds))
 	for _, fd := range f.Feeds {
@@ -308,13 +304,14 @@ func (f *File) Weights(configured []string, now time.Time) map[string]float64 {
 			out[u] = 1.0
 			continue
 		}
-		computed := 5.0 // dormant: no in-window items → max boost
+		computed := defaults.MaxFeedWeight // dormant: no in-window items → max boost
 		if rate := rateOf(fd); rate > 0 {
 			computed = med / rate
-			if computed > 5.0 {
-				computed = 5.0
+			if computed > defaults.MaxFeedWeight {
+				computed = defaults.MaxFeedWeight
 			}
 		}
+		computed *= coverage(fd)
 		confidence := now.Sub(fd.FirstSeen).Hours() / cadenceWindow.Hours()
 		if confidence < 0 {
 			confidence = 0
@@ -351,6 +348,39 @@ func (f *File) Weights(configured []string, now time.Time) map[string]float64 {
 // that the CURRENT document stopped dating anything.
 func hasCadenceSignal(fd Feed) bool {
 	return fd.LastDocDated > 0 || (fd.LastDocItems == 0 && fd.EverDated)
+}
+
+// coverage is the fraction of the last full document's items that carried
+// a parseable date. It scales the computed cadence weight, closing the
+// mixed-document gap [hasCadenceSignal] cannot see.
+//
+// The gap: a document with one dated item in fifty passes the eligibility
+// test on the strength of that single date, and if the date is out of
+// window the feed reads as dormant and takes the cap — while its
+// forty-nine undated items each take FETCH TIME as their timestamp, i.e.
+// maximum recency. Max boost × max recency, on every render, from one
+// badly dated feed. Scaling by dated/items degrades that to ~0.1 instead,
+// and does it smoothly: a threshold would put a cliff where a feed
+// hovering near it flips between the cap and neutral between fetches.
+//
+// LastDocItems == 0 is coverage 1.0, not a division by zero: a document
+// with nothing in it is the genuinely quiet feed the dormant boost exists
+// for (hasCadenceSignal's second clause), and it carries no evidence of
+// bad dating to discount. The result clamps to [0, 1] so a stored pair
+// that disagrees with itself can only ever shrink a weight, never push
+// one past MaxFeedWeight.
+func coverage(fd Feed) float64 {
+	if fd.LastDocItems <= 0 {
+		return 1.0
+	}
+	c := float64(fd.LastDocDated) / float64(fd.LastDocItems)
+	if c < 0 {
+		return 0
+	}
+	if c > 1 {
+		return 1
+	}
+	return c
 }
 
 func median(xs []float64) float64 {

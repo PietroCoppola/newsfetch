@@ -66,6 +66,29 @@ const (
 	TickerBoxed = false
 )
 
+const (
+	// MaxFeedWeight is the upper bound on a following-pool feed's ranking
+	// multiplier and the single home for that number. internal/feedstate
+	// caps its computed cadence weight here, and internal/config validates
+	// a manually configured per-feed weight against the same constant, so
+	// the automatic and manual paths cannot drift apart — which is exactly
+	// what two hardcoded 5.0s in two packages would eventually do.
+	MaxFeedWeight = 5.0
+
+	// DefaultFeedMaxItems is how many of a feed's newest items reach the
+	// pool when the feed sets no max_items of its own. Three keeps a busy
+	// publisher from filling the candidate pool before the cadence weight
+	// gets a say, while still giving a weekly blog more than one shot.
+	DefaultFeedMaxItems = 3
+
+	// MinFeedItems and MaxFeedItems bound a per-feed max_items override.
+	// Zero would silently disable a feed the user deliberately configured,
+	// which is what removing it from the config is for; past ten a single
+	// feed crowds out every other feed in the pool.
+	MinFeedItems = 1
+	MaxFeedItems = 10
+)
+
 // Sources returns the default source list as a fresh copy per call,
 // matching the fetch.KnownSourceNames registry convention (Go cannot
 // declare const slices). M4 ships HN-only by default and requires the
