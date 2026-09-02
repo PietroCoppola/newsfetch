@@ -1,7 +1,6 @@
 package render
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -187,37 +186,4 @@ func tickerBody(s fetch.Story, now time.Time, budget int) string {
 		return truncate(s.Title+suffix, budget)
 	}
 	return truncate(s.Title, budget-suffixCols) + suffix
-}
-
-// JSONMulti renders stories as a JSON array, one object per story, matching
-// the [JSON] single-story shape per element. The trailing newline matches
-// JSON's pipeline-friendly convention.
-func JSONMulti(stories []fetch.Story, now time.Time) string {
-	type payload struct {
-		Title      string   `json:"title"`
-		URL        string   `json:"url"`
-		Source     string   `json:"source"`
-		AgeSeconds int64    `json:"age_seconds"`
-		Tags       []string `json:"tags"`
-	}
-	out := make([]payload, len(stories))
-	for i, s := range stories {
-		tags := s.Tags
-		if tags == nil {
-			tags = []string{}
-		}
-		ageSeconds := int64(now.Sub(s.CreatedAt).Seconds())
-		if ageSeconds < 0 {
-			ageSeconds = 0
-		}
-		out[i] = payload{
-			Title:      s.Title,
-			URL:        s.URL,
-			Source:     s.Source,
-			AgeSeconds: ageSeconds,
-			Tags:       tags,
-		}
-	}
-	b, _ := json.Marshal(out)
-	return string(b) + "\n"
 }

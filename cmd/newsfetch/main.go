@@ -663,8 +663,8 @@ func writeCache(path string, stories []fetch.Story, at time.Time) error {
 //   - boxed:   render.Multi handles single-story (delegates to Boxed) and
 //     multi-story (hero + ticker) uniformly.
 //   - minimal: N stacked minimal lines (literal repetition, no decoration).
-//   - json:    one JSON object when len==1, a JSON array when len>1, so
-//     existing single-story scripted consumers stay unbroken.
+//   - json:    a uniform top-level array with a pool field on every
+//     object (R-3). The bare-object-at-count-1 shape is gone.
 func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now time.Time) error {
 	if len(stories) == 0 {
 		return nil
@@ -675,11 +675,14 @@ func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now t
 			fmt.Fprint(out, render.Minimal(s, now))
 		}
 	case "json":
-		if len(stories) == 1 {
-			fmt.Fprint(out, render.JSON(stories[0], now))
-			return nil
-		}
-		fmt.Fprint(out, render.JSONMulti(stories, now))
+		// Single-pool call site: everything reaching writeStories today
+		// came out of the news cache. Pool-aware dispatch lands with
+		// writePools.
+		fmt.Fprint(out, render.JSONPools([]render.Pool{{
+			Name:    "news",
+			Label:   defaults.PoolLabel("news"),
+			Stories: stories,
+		}}, now))
 	default:
 		rendered, err := render.Multi(stories, now, defaults.TermWidth(defaults.BoxWidth), render.MultiOptions{
 			Marker: render.TickerMarker(cfg.TickerMarker),

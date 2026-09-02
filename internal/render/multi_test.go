@@ -173,24 +173,6 @@ func TestMulti_ErrorsOnEmpty(t *testing.T) {
 	}
 }
 
-func TestJSONMulti_EmitsArray(t *testing.T) {
-	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
-	stories := fixtureStories(now)
-	got := render.JSONMulti(stories, now)
-	if !strings.HasPrefix(got, "[") {
-		t.Errorf("JSONMulti must emit an array; got: %s", got)
-	}
-	if !strings.HasSuffix(strings.TrimRight(got, "\n"), "]") {
-		t.Errorf("JSONMulti must emit a closed array; got: %s", got)
-	}
-	if !strings.Contains(got, `"title":"Hero story title"`) {
-		t.Errorf("JSONMulti missing first story; got: %s", got)
-	}
-	if !strings.Contains(got, `"title":"Third story"`) {
-		t.Errorf("JSONMulti missing last story; got: %s", got)
-	}
-}
-
 // TestKnownTickerMarkers_ReturnsCopy pins the registry's immutability: a
 // caller mutating the returned slice must not affect what later callers
 // see (the validator and the wizards all consume this list).

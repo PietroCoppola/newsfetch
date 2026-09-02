@@ -416,15 +416,23 @@ func TestRunDefault_StyleJSON_WithInvalidConfig_StdoutIsCleanJSON(t *testing.T) 
 	if err := runDefault(&stdout, &stderr, []string{"--style=json"}, rng); err != nil {
 		t.Fatalf("runDefault: %v", err)
 	}
-	// stdout must be parseable JSON despite the broken config.
-	var payload map[string]any
+	// R-3: --style=json is a uniform top-level ARRAY with a pool field on
+	// every object. The bare-object-at-count-1 shape this test used to
+	// assert was removed deliberately.
+	var payload []map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("stdout not parseable JSON: %v\nstdout: %q\nstderr: %q", err, stdout.String(), stderr.String())
+		t.Fatalf("stdout not a parseable JSON array: %v\nstdout: %q\nstderr: %q", err, stdout.String(), stderr.String())
 	}
-	for _, key := range []string{"title", "url", "source", "age_seconds", "tags"} {
-		if _, ok := payload[key]; !ok {
+	if len(payload) != 1 {
+		t.Fatalf("got %d elements, want 1 (default count): %s", len(payload), stdout.String())
+	}
+	for _, key := range []string{"title", "url", "source", "age_seconds", "tags", "pool"} {
+		if _, ok := payload[0][key]; !ok {
 			t.Errorf("missing key %q in JSON output: %s", key, stdout.String())
 		}
+	}
+	if payload[0]["pool"] != "news" {
+		t.Errorf("pool = %v, want \"news\"", payload[0]["pool"])
 	}
 	// stderr must carry the one-line warning.
 	if !strings.Contains(stderr.String(), "newsfetch:") {
