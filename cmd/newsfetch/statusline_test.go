@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
@@ -397,5 +398,366 @@ func TestStatusline_PinnedRefreshSpawnsOutsideLock(t *testing.T) {
 	}
 	if otherErr != nil {
 		t.Fatalf("probe could not acquire sessions.lock for an unrelated reason: %v", otherErr)
+	}
+}
+
+// testFeedURL is the single feed enableFollowing configures and
+// seedFollowingPool attributes its stories to. They must agree: the cadence
+// weight is looked up by Story.Feed, so a mismatch would silently drop the
+// weight and the test would stop covering what it claims to.
+const testFeedURL = "https://blog.example/feed.xml"
+
+// writeUserConfig writes body as the config.toml inside the isolated XDG
+// config root. Written as TOML rather than constructed in Go because the
+// statusline reads its config off disk through config.Load, and the on-disk
+// schema is what a user actually edits — including the clamps Validate
+// applies to it.
+func writeUserConfig(t *testing.T, configDir, body string) {
+	t.Helper()
+	path := filepath.Join(configDir, "newsfetch", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// enableFollowing turns the following pool on with one feed, leaving the news
+// pool at its default aggregators.
+func enableFollowing(t *testing.T, configDir string) {
+	t.Helper()
+	writeUserConfig(t, configDir, "pools = [\"following\", \"news\"]\n\n[[following.feeds]]\nurl = \""+testFeedURL+"\"\n")
+}
+
+// seedFollowingPool writes the following pool's cache with one story per
+// title, fetched at fetchedAt. Ages are pinned at 90 minutes for the same
+// reason seedNewsPool pins them: a stable "1h ago" bucket.
+func seedFollowingPool(t *testing.T, fetchedAt time.Time, titles ...string) {
+	t.Helper()
+	now := time.Now().UTC()
+	stories := make([]fetch.Story, len(titles))
+	for i, title := range titles {
+		stories[i] = fetch.Story{
+			ID:        fmt.Sprintf("feed-%d", i),
+			Title:     title,
+			URL:       fmt.Sprintf("https://blog.example/post-%d", i),
+			Source:    "following",
+			Feed:      testFeedURL,
+			Author:    "essayist",
+			CreatedAt: now.Add(-90 * time.Minute),
+			Tags:      []string{},
+		}
+	}
+	path, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCache(path, stories, fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countSpawnRefresh swaps the detached-refresh seam for a counter so a test
+// can assert the spawn without leaving a real background process behind.
+// Restored via t.Cleanup, per the seam's contract.
+func countSpawnRefresh(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	restore := spawnRefresh
+	spawnRefresh = func() { n++ }
+	t.Cleanup(func() { spawnRefresh = restore })
+	return &n
+}
+
+// TestStatusline_FollowingBeatsNews pins design addendum item 1: precedence,
+// never competition. The two rows differ only in how old the following cache
+// is — a STALE following cache still wins over a fresh news one, because
+// freshness never reorders the pools — and each row runs through BOTH
+// statusline paths. If precedence landed in only one of them, a pinned turn
+// and an unpinned turn could pick from different pools and the status row
+// would flicker between them, which is the exact failure pinning exists to
+// prevent.
+func TestStatusline_FollowingBeatsNews(t *testing.T) {
+	cases := []struct {
+		name         string
+		followingAge time.Duration
+	}{
+		{"fresh following cache", 1 * time.Minute},
+		{"stale following cache", 90 * time.Minute},
+	}
+	paths := []struct {
+		name string
+		args []string
+	}{
+		{"unpinned", []string{"--style=statusline", "--pin="}},
+		{"pinned", []string{"--style=statusline", "--pin=prompt-1"}},
+	}
+	for _, tc := range cases {
+		for _, p := range paths {
+			t.Run(tc.name+"/"+p.name, func(t *testing.T) {
+				_, configDir := isolateXDG(t)
+				enableFollowing(t, configDir)
+				countSpawnRefresh(t)
+				now := time.Now().UTC()
+				seedFollowingPool(t, now.Add(-tc.followingAge), "The case for slow blogging")
+				seedNewsPool(t, 1, now.Add(-1*time.Minute))
+
+				out := runStatuslineArgs(t, 1, p.args...)
+				if !strings.Contains(out, "The case for slow blogging") {
+					t.Errorf("statusline = %q, want the following-pool story", out)
+				}
+				if strings.Contains(out, "Story A") {
+					t.Errorf("statusline = %q, want no news-pool story", out)
+				}
+			})
+		}
+	}
+}
+
+// TestStatusline_ColdFollowingFallsBackToNews covers branch (a): a following
+// pool with no cache file contributes nothing and must NOT fetch — the
+// statusline never blocks on the network. It falls through to news and leaves
+// a refresh behind for the next terminal open.
+func TestStatusline_ColdFollowingFallsBackToNews(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	enableFollowing(t, configDir)
+	spawned := countSpawnRefresh(t)
+	seedNewsPool(t, 1, time.Now().UTC().Add(-1*time.Minute))
+
+	out := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(out, "Story A") {
+		t.Errorf("statusline = %q, want the news-pool story", out)
+	}
+	if *spawned == 0 {
+		t.Error("a cold following cache should have spawned a refresh")
+	}
+}
+
+// TestStatusline_FullySeenFollowingFallsBackToNews covers branch (b): the
+// following pool is filtered with the all-seen bypass OFF, so once its only
+// story has been rendered the pool reports fully-seen and news gets the slot.
+// With the bypass on, the second render would repeat the followed story and
+// news would be unreachable forever.
+func TestStatusline_FullySeenFollowingFallsBackToNews(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	enableFollowing(t, configDir)
+	countSpawnRefresh(t)
+	now := time.Now().UTC()
+	seedFollowingPool(t, now.Add(-1*time.Minute), "The case for slow blogging")
+	seedNewsPool(t, 1, now.Add(-1*time.Minute))
+
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(first, "The case for slow blogging") {
+		t.Fatalf("first statusline = %q, want the followed story", first)
+	}
+	second := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(second, "Story A") {
+		t.Errorf("second statusline = %q, want the news story once the only followed story is seen", second)
+	}
+}
+
+// TestStatusline_NoFeedsIsByteIdenticalToV060 is a REGRESSION PIN, not a
+// feature test. A user with no feeds configured must get exactly the v0.6.0
+// status row, byte for byte: the OSC 8 link, the underlined title, the dim
+// metadata tail closed with SGR 22, and nothing else. Any pool label, prefix,
+// separator, or reordering that leaks out of the pool work into the status
+// row fails here. --max-width is pinned so the assertion does not depend on
+// terminal detection.
+func TestStatusline_NoFeedsIsByteIdenticalToV060(t *testing.T) {
+	isolateXDG(t) // no config file at all: pools defaults to ["news"]
+	countSpawnRefresh(t)
+	seedNewsPool(t, 1, time.Now().UTC().Add(-1*time.Minute))
+
+	got := runStatuslineArgs(t, 1, "--style=statusline", "--pin=", "--max-width=80")
+	want := "\x1b]8;;https://example.com/a\x1b\\" +
+		"\x1b[4mStory A\x1b[24m" +
+		"\x1b]8;;\x1b\\" +
+		"\x1b[2m · example.com · 1h ago · by author-a\x1b[22m\n"
+	if got != want {
+		t.Errorf("statusline output changed for a no-feeds user:\n got = %q\nwant = %q", got, want)
+	}
+}
+
+// TestStatusline_BothPoolsColdRendersNothing keeps today's shape when no
+// active pool has anything cached: empty output beats a "no fresh news"
+// banner in a status row, and a detached refresh is left behind.
+func TestStatusline_BothPoolsColdRendersNothing(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	enableFollowing(t, configDir)
+	spawned := countSpawnRefresh(t)
+
+	out := runStatuslineArgs(t, 1, "--style=statusline", "--pin=prompt-1")
+	if out != "" {
+		t.Errorf("output = %q, want empty (never block on the network)", out)
+	}
+	if *spawned == 0 {
+		t.Error("both pools cold did not spawn a detached refresh")
+	}
+}
+
+// TestStatusline_EmptyFollowingCacheIsNotStale pins ruling R-36 on the
+// surface that pays for it most: the statusline runs on every prompt of every
+// Claude Code turn, so a predicate that mistakes "empty" for "missing" spawns
+// a detached process every prompt, forever, for any user whose feeds have
+// gone quiet. Presence and freshness come from the cache file, not from the
+// story count — an empty cache that is inside its TTL is present and fresh,
+// contributes no story, and asks for nothing. The stale row is the control:
+// the same empty cache past its TTL must still spawn, exactly once, or the
+// pool could never refill.
+func TestStatusline_EmptyFollowingCacheIsNotStale(t *testing.T) {
+	cases := []struct {
+		name         string
+		followingAge time.Duration
+		wantSpawns   int
+	}{
+		{"fresh empty following cache", 1 * time.Minute, 0},
+		{"stale empty following cache", 90 * time.Minute, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, configDir := isolateXDG(t)
+			enableFollowing(t, configDir)
+			spawned := countSpawnRefresh(t)
+			now := time.Now().UTC()
+			// No titles: a cache file that read cleanly and holds zero
+			// stories, which is what an all-304 refresh of a quiet feed
+			// leaves behind.
+			seedFollowingPool(t, now.Add(-tc.followingAge))
+			seedNewsPool(t, 1, now.Add(-1*time.Minute))
+
+			out := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+			if !strings.Contains(out, "Story A") {
+				t.Errorf("statusline = %q, want the news story: an empty following pool contributes nothing", out)
+			}
+			if *spawned != tc.wantSpawns {
+				t.Errorf("spawnRefresh called %d times, want %d", *spawned, tc.wantSpawns)
+			}
+		})
+	}
+}
+
+// TestStatusline_FullySeenFollowingWithNoNewsRepeats pins ruling R-31:
+// repeats beat silence, but only as a LAST resort. Here the following pool's
+// only story is already seen and there is no news cache to fall through to,
+// so every pool has come back empty while one of them still holds content.
+// Re-showing that story is the right answer — a blank status row would be
+// worse. This case isolates the following pool: with no news cache at all,
+// the last-resort pass has exactly one pool to re-show, so it pins the
+// re-show itself rather than the pool_order tie-break (which
+// TestStatusline_AllSeenEverywhereRepeatsFirstPoolInPoolOrder covers).
+func TestStatusline_FullySeenFollowingWithNoNewsRepeats(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	enableFollowing(t, configDir)
+	countSpawnRefresh(t)
+	seedFollowingPool(t, time.Now().UTC().Add(-1*time.Minute), "The case for slow blogging")
+
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(first, "The case for slow blogging") {
+		t.Fatalf("first statusline = %q, want the followed story", first)
+	}
+	second := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if second != first {
+		t.Errorf("second statusline = %q, want the seen followed story re-shown (%q)", second, first)
+	}
+}
+
+// TestStatusline_AllSeenEverywhereRepeatsFirstPoolInPoolOrder is R-31's
+// tie-break, and it is deliberately the same scenario and the same name as
+// TestAssemblePools_TwoPassBypass's "all seen everywhere renders the first
+// pool in pool_order" case. Both pools are present and every story in both
+// has been rendered, so the last-resort pass runs and pool_order decides.
+// The boxed render repeats from the first pool in pool_order; the status row
+// must repeat from that same pool. If these two diverge, one user looking at
+// one terminal sees the box re-show a followed post while the status row
+// re-shows a news story — two surfaces disagreeing about the same state.
+func TestStatusline_AllSeenEverywhereRepeatsFirstPoolInPoolOrder(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	enableFollowing(t, configDir) // pool_order normalises to [following news]
+	countSpawnRefresh(t)
+	now := time.Now().UTC()
+	seedFollowingPool(t, now.Add(-1*time.Minute), "The case for slow blogging")
+	seedNewsPool(t, 1, now.Add(-1*time.Minute))
+
+	// Render once per pool to drive both fully seen: precedence gives the
+	// followed story first, then news once following has nothing new.
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(first, "The case for slow blogging") {
+		t.Fatalf("first statusline = %q, want the followed story", first)
+	}
+	second := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(second, "Story A") {
+		t.Fatalf("second statusline = %q, want the news story", second)
+	}
+
+	third := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if third != first {
+		t.Errorf("third statusline = %q, want the first pool in pool_order re-shown (%q)", third, first)
+	}
+	if strings.Contains(third, "Story A") {
+		t.Errorf("third statusline = %q, want no news story: pool_order puts following first", third)
+	}
+}
+
+// TestStatusline_NoFeedsFullySeenNewsRepeats is the v0.6.0 pin for the
+// last-resort pass. With no feeds configured there is one pool, and once its
+// only story is seen the FIRST pass yields nothing — the bypass is off for
+// news now, exactly as it is for following. What keeps a no-feeds user's
+// status row from going blank is the last-resort pass re-showing the seen
+// news story. If that pass ever stops covering a single-pool config, this is
+// the test that catches it, and the regression it catches is a status row
+// that silently empties for every user who never configured a feed.
+func TestStatusline_NoFeedsFullySeenNewsRepeats(t *testing.T) {
+	isolateXDG(t) // no config file at all: pools defaults to ["news"]
+	countSpawnRefresh(t)
+	seedNewsPool(t, 1, time.Now().UTC().Add(-1*time.Minute))
+
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=", "--max-width=80")
+	if !strings.Contains(first, "Story A") {
+		t.Fatalf("first statusline = %q, want the news story", first)
+	}
+	second := runStatuslineArgs(t, 1, "--style=statusline", "--pin=", "--max-width=80")
+	if second != first {
+		t.Errorf("second statusline = %q, want the seen news story re-shown (%q)", second, first)
+	}
+}
+
+// TestStatusline_EmptyNewsAggregatorsIsNeverRead pins ruling R-35 on the
+// statusline. The news pool is enabled but has no aggregators, so
+// NewsActive() is false and the pool must not be read at all — not for a
+// story, not for staleness. feed.json here is a ghost: stories cached before
+// the user emptied the list. Gating on PoolEnabled instead of NewsActive
+// serves those ghosts on every prompt while asking for a refresh that
+// deliberately skips the pool.
+//
+// The second render is what proves the skip. The first is answered by
+// precedence, which would hide the bug; the second falls out of a fully-seen
+// following pool, where an active news pool WOULD take the slot.
+func TestStatusline_EmptyNewsAggregatorsIsNeverRead(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	// Validate keeps this shape: the following pool has content, so the
+	// all-empty-pools clamp (R-9) does not fire and the empty aggregator
+	// list survives Load (R-8).
+	writeUserConfig(t, configDir, "pools = [\"following\", \"news\"]\n\n[news]\naggregators = []\n\n[[following.feeds]]\nurl = \""+testFeedURL+"\"\n")
+	spawned := countSpawnRefresh(t)
+	now := time.Now().UTC()
+	seedFollowingPool(t, now.Add(-1*time.Minute), "The case for slow blogging")
+	// Deliberately stale: an ACTIVE news pool would report itself stale
+	// here and spawn. An inactive one is never read, so it cannot.
+	seedNewsPool(t, 1, now.Add(-90*time.Minute))
+
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(first, "The case for slow blogging") {
+		t.Fatalf("first statusline = %q, want the followed story", first)
+	}
+	second := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if strings.Contains(second, "Story A") {
+		t.Errorf("second statusline = %q, want no news story: the news pool has no aggregators", second)
+	}
+	if second != first {
+		t.Errorf("second statusline = %q, want the seen followed story re-shown (%q)", second, first)
+	}
+	if *spawned != 0 {
+		t.Errorf("spawnRefresh called %d times, want 0: the following cache is fresh, and a stale cache belonging to an inactive pool is never read", *spawned)
 	}
 }
