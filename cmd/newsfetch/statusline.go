@@ -46,6 +46,11 @@ var errNoStorySelected = errors.New("statusline: selection produced no story")
 // store is unreachable — a wedged lock, an unresolvable path — the render
 // degrades to an unpinned fresh selection: a wedged lock should cost
 // stickiness, not the status row.
+//
+// Both paths select through pickStatusline and differ only in what they do
+// with the story it returns: render it, or build the session.Entry that
+// later renders of the same pin will reproduce. Keeping that in one place is
+// what stops a pinned turn and an unpinned turn from picking differently.
 func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, rng *rand.Rand) error {
 	pin := resolvePinKey(cli.pin, os.Stdin)
 	width := cli.maxWidth
@@ -59,10 +64,27 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	if pin != "" {
 		if sPath, err := session.Path(); err == nil {
 			// Set only when the entry is created here; a pin hit reads
-			// no cache and so has no staleness to report.
+			// no cache and so has no staleness to report. The spawn it
+			// gates happens below, after GetOrCreate has released
+			// sessions.lock — a detached process must never be started
+			// from inside the critical section.
 			stale := false
 			e, err := session.GetOrCreate(sPath, pin, func() (session.Entry, error) {
-				return selectPinnedStory(cfg, errOut, rng, pin, now, &stale)
+				// loadSeen stays inside the callback: a pin hit never
+				// runs it, and so never reads seen.json at all.
+				seen := loadSeen(cfg, now, errOut)
+				s, needRefresh, err := pickStatusline(cfg, seen, now, rng, errOut)
+				if err != nil {
+					return session.Entry{}, err
+				}
+				stale = needRefresh
+				// The entry carries the story's author and CreatedAt so
+				// later renders of the same pin reproduce this render's
+				// metadata tail exactly.
+				return session.Entry{
+					Key: pin, Hash: s.Hash(), Title: s.Title, URL: s.URL,
+					Author: s.Author, CreatedAt: s.CreatedAt, PinnedAt: now,
+				}, nil
 			})
 			switch {
 			case err == nil:
@@ -85,79 +107,64 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 		}
 	}
 
-	path, err := cache.Path()
-	if err != nil {
-		return err
-	}
-	f, readErr := cache.Read(path)
-	if readErr != nil || len(f.Stories) == 0 {
-		spawnRefresh()
-		return nil
-	}
-
 	seen := loadSeen(cfg, now, errOut)
-	// The statusline renders one story from the news cache with the
-	// all-seen bypass on — today's behaviour, unchanged. Task 14 replaces
-	// this with the following→news precedence pick.
-	picked, err := selectFromPool(poolPick{
-		Name:    "news",
-		Stories: f.Stories,
-		Count:   1,
-	}, seen, cfg, true, now, rng)
-	if err != nil {
+	s, needRefresh, err := pickStatusline(cfg, seen, now, rng, errOut)
+	switch {
+	case err == nil:
+		fmt.Fprint(out, render.Statusline(s, now, width))
+		if needRefresh {
+			spawnRefresh()
+		}
+		return nil
+	case errors.Is(err, errNoCachedStories):
+		spawnRefresh()
+		return nil
+	case errors.Is(err, errNoStorySelected):
+		// A non-empty cache that yielded nothing is not worth a warning:
+		// there is simply no line to draw this turn.
+		return nil
+	default:
 		return err
 	}
-	if len(picked) == 0 {
-		return nil
-	}
-	fmt.Fprint(out, render.Statusline(picked[0], now, width))
-	recordHistory(picked, now, errOut)
-	if !f.IsFresh(cfg.CacheTTL, now) {
-		spawnRefresh()
-	}
-	return nil
 }
 
-// selectPinnedStory picks the story to pin for one user turn: read the
-// cache, select against history, record what was selected. It runs under
-// the session lock as session.GetOrCreate's create callback, so exactly one
-// concurrent render reaches it per key. stale is set when the cache it read
-// was past its TTL — the caller spawns the refresh once the lock is
-// released rather than holding it across a process spawn.
+// pickStatusline chooses the one story the status row will show and records
+// it as rendered. It is the single selection path both statusline callers
+// use — the unpinned render and the pinned create-callback — so the two can
+// never drift into picking from different inputs.
 //
-// The entry carries the story's author and CreatedAt so later renders of
-// the same pin reproduce this render's metadata tail exactly.
-func selectPinnedStory(cfg config.Config, errOut io.Writer, rng *rand.Rand, pin string, now time.Time, stale *bool) (session.Entry, error) {
-	path, err := cache.Path()
+// The second return value reports that the cache it read has gone stale. It
+// is a return value rather than a spawn because this function runs under
+// sessions.lock on the pinned path: the caller starts the detached refresh
+// once the lock is released.
+//
+// The pick is always exactly one story. The statusline is a single line, so
+// neither count nor following_count has any meaning here — hence Count: 1 on
+// the pick rather than anything read off cfg.
+func pickStatusline(cfg config.Config, seen map[string]struct{}, now time.Time, rng *rand.Rand, errOut io.Writer) (fetch.Story, bool, error) {
+	path, err := cache.PoolPath("news")
 	if err != nil {
-		return session.Entry{}, err
+		return fetch.Story{}, false, err
 	}
 	f, readErr := cache.Read(path)
 	if readErr != nil || len(f.Stories) == 0 {
-		return session.Entry{}, errNoCachedStories
+		return fetch.Story{}, false, errNoCachedStories
 	}
-	seen := loadSeen(cfg, now, errOut)
-	// The statusline renders one story from the news cache with the
-	// all-seen bypass on — today's behaviour, unchanged. Task 14 replaces
-	// this with the following→news precedence pick.
+	// Label is deliberately empty: labels are box chrome, and nothing in a
+	// status row is ever labelled.
 	picked, err := selectFromPool(poolPick{
 		Name:    "news",
 		Stories: f.Stories,
 		Count:   1,
 	}, seen, cfg, true, now, rng)
 	if err != nil {
-		return session.Entry{}, err
+		return fetch.Story{}, false, err
 	}
 	if len(picked) == 0 {
-		return session.Entry{}, errNoStorySelected
+		return fetch.Story{}, false, errNoStorySelected
 	}
-	s := picked[0]
 	recordHistory(picked, now, errOut)
-	*stale = !f.IsFresh(cfg.CacheTTL, now)
-	return session.Entry{
-		Key: pin, Hash: s.Hash(), Title: s.Title, URL: s.URL,
-		Author: s.Author, CreatedAt: s.CreatedAt, PinnedAt: now,
-	}, nil
+	return picked[0], !f.IsFresh(cfg.CacheTTL, now), nil
 }
 
 // resolvePinKey returns the story-pinning key: an explicit --pin wins;
