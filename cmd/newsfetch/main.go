@@ -143,7 +143,7 @@ func runSettings(out io.Writer) error {
 			return onboard.Answers{
 				Topics:       cfg.Topics,
 				Style:        cfg.Style,
-				Sources:      cfg.Sources,
+				Sources:      cfg.News.Aggregators,
 				Count:        cfg.Count,
 				TickerMarker: cfg.TickerMarker,
 				TickerBoxed:  cfg.TickerBoxed,
@@ -260,7 +260,7 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
 	}
 	if len(stories) == 0 {
-		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg.Sources)))
+		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg.News.Aggregators)))
 		return nil
 	}
 	picked, err := selectFromPool(stories, seen, cfg, now, rng)
@@ -552,16 +552,16 @@ func fallbackMessage(sources []string) string {
 	return defaults.FallbackMessage
 }
 
-// multiFetch instantiates each Source named in cfg.Sources and runs them in
-// parallel via fetch.FetchAll. Per-source errors flow back as a name→err
-// map; the caller decides whether to log them, surface to the user, or
-// both. A factory error (unknown source name) is treated as fatal because
-// config.Validate is supposed to filter those out before we get here — if
-// one slips through, that's a bug worth surfacing rather than silently
-// degrading.
+// multiFetch instantiates each Source named in cfg.News.Aggregators and
+// runs them in parallel via fetch.FetchAll. Per-source errors flow back as
+// a name→err map; the caller decides whether to log them, surface to the
+// user, or both. A factory error (unknown source name) is treated as fatal
+// because config.Validate is supposed to filter those out before we get
+// here — if one slips through, that's a bug worth surfacing rather than
+// silently degrading.
 func multiFetch(ctx context.Context, cfg config.Config) ([]fetch.Story, map[string]error, error) {
-	sources := make([]fetch.Source, 0, len(cfg.Sources))
-	for _, name := range cfg.Sources {
+	sources := make([]fetch.Source, 0, len(cfg.News.Aggregators))
+	for _, name := range cfg.News.Aggregators {
 		src, err := newSource(name)
 		if err != nil {
 			return nil, nil, err

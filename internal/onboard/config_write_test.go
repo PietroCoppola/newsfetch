@@ -79,8 +79,8 @@ func TestWriteConfig_NonNilSourcesEmitsLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if !reflect.DeepEqual(cfg.Sources, []string{"hackernews", "lobsters"}) {
-		t.Errorf("Sources = %v, want [hackernews lobsters]", cfg.Sources)
+	if !reflect.DeepEqual(cfg.News.Aggregators, []string{"hackernews", "lobsters"}) {
+		t.Errorf("News.Aggregators = %v, want [hackernews lobsters]", cfg.News.Aggregators)
 	}
 }
 
@@ -121,8 +121,8 @@ func TestOverwriteConfig_ReplacesExisting(t *testing.T) {
 	if cfg.Style != "minimal" {
 		t.Errorf("Style = %q, want minimal", cfg.Style)
 	}
-	if !reflect.DeepEqual(cfg.Sources, []string{"hackernews"}) {
-		t.Errorf("Sources = %v, want [hackernews]", cfg.Sources)
+	if !reflect.DeepEqual(cfg.News.Aggregators, []string{"hackernews"}) {
+		t.Errorf("News.Aggregators = %v, want [hackernews]", cfg.News.Aggregators)
 	}
 }
 

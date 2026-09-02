@@ -67,26 +67,26 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: unknown style %q (%s), using %q\n", bad, sourceLabel(src.Style, "style"), c.Style)
 		return silentlyCorrect(c)
 	}
-	valid, dropped := splitSources(c.Sources)
+	valid, dropped := splitSources(c.News.Aggregators)
 	if len(valid) == 0 {
 		// Either user wrote sources=[], or every name was unknown. Either
 		// way, running with no sources means the renderer would always
 		// hit the offline fallback — fail loud and reset to defaults so
 		// the next invocation actually shows news.
-		c.Sources = Defaults().Sources
+		c.News.Aggregators = Defaults().News.Aggregators
 		if len(dropped) > 0 {
-			fmt.Fprintf(w, "newsfetch: sources contained no recognised names (dropped: %v); using %v\n", dropped, c.Sources)
+			fmt.Fprintf(w, "newsfetch: sources contained no recognised names (dropped: %v); using %v\n", dropped, c.News.Aggregators)
 		} else {
-			fmt.Fprintf(w, "newsfetch: sources is empty; using %v\n", c.Sources)
+			fmt.Fprintf(w, "newsfetch: sources is empty; using %v\n", c.News.Aggregators)
 		}
 		return silentlyCorrect(c)
 	}
 	if len(dropped) > 0 {
-		c.Sources = valid
+		c.News.Aggregators = valid
 		fmt.Fprintf(w, "newsfetch: unknown source name(s) %v dropped; using %v\n", dropped, valid)
 		return silentlyCorrect(c)
 	}
-	c.Sources = valid
+	c.News.Aggregators = valid
 	if c.CacheTTL < minCacheTTL {
 		badMins := int(c.CacheTTL / time.Minute)
 		c.CacheTTL = minCacheTTL
@@ -151,10 +151,10 @@ func silentlyCorrect(c Config) Config {
 	if c.MinPoints < 0 {
 		c.MinPoints = 0
 	}
-	if valid, _ := splitSources(c.Sources); len(valid) == 0 {
-		c.Sources = Defaults().Sources
+	if valid, _ := splitSources(c.News.Aggregators); len(valid) == 0 {
+		c.News.Aggregators = Defaults().News.Aggregators
 	} else {
-		c.Sources = valid
+		c.News.Aggregators = valid
 	}
 	c.Count = clampCount(c.Count)
 	if !knownTickerMarker(c.TickerMarker) {
