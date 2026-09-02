@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -15,9 +16,11 @@ import (
 	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/cache"
+	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
+	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
 )
 
 // isolateXDG points every XDG root (and HOME, which the XDG fallbacks
@@ -156,8 +159,9 @@ func TestFallbackMessage_MultiSourceGeneric(t *testing.T) {
 }
 
 func TestFallbackMessage_NoSourcesGeneric(t *testing.T) {
-	// Defence-in-depth: cfg.Sources should never be empty post-Validate,
-	// but if it ever is, the generic message is the safe choice.
+	// Defence-in-depth: cfg.News.Aggregators should never be empty
+	// post-Validate, but if it ever is, the generic message is the safe
+	// choice.
 	got := fallbackMessage(nil)
 	if got != defaults.FallbackMessage {
 		t.Errorf("nil-sources fallback = %q, want default", got)
@@ -425,5 +429,295 @@ func TestRunDefault_StyleJSON_WithInvalidConfig_StdoutIsCleanJSON(t *testing.T) 
 	// stderr must carry the one-line warning.
 	if !strings.Contains(stderr.String(), "newsfetch:") {
 		t.Errorf("expected warning on stderr; got %q", stderr.String())
+	}
+}
+
+// writeRefreshConfig writes a config.toml into the isolated
+// XDG_CONFIG_HOME. runRefresh loads its own config from disk — there is no
+// injection seam — so a pool-level test has to go through a real file.
+func writeRefreshConfig(t *testing.T, feedURLs []string, aggregators []string) {
+	t.Helper()
+	path, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	var b strings.Builder
+	pools := `pools = ["news", "following"]`
+	if len(feedURLs) == 0 {
+		pools = `pools = ["news"]`
+	}
+	fmt.Fprintf(&b, "%s\n\n[news]\naggregators = [", pools)
+	for i, a := range aggregators {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", a)
+	}
+	b.WriteString("]\n")
+	for _, u := range feedURLs {
+		fmt.Fprintf(&b, "\n[[following.feeds]]\nurl = %q\n", u)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// failIfFollowingBuilt mirrors the newSource defence the two refresh-lock
+// tests use (main_test.go:189-193): if a regression reaches the following
+// fan-out when it must not, the test fails instead of silently issuing N
+// feed requests. The returned client has no feeds, so FetchFeeds does
+// nothing even if the guard is reached.
+func failIfFollowingBuilt(t *testing.T, why string) {
+	t.Helper()
+	original := newFollowing
+	newFollowing = func(specs []fetch.FeedSpec, validators func(string) (string, string)) *fetch.Following {
+		t.Errorf("runRefresh built the following fan-out (%d feeds) %s", len(specs), why)
+		return &fetch.Following{}
+	}
+	t.Cleanup(func() { newFollowing = original })
+}
+
+// rssServer serves one dated RSS item at /feed.xml, or 500 everywhere when
+// broken is true.
+func rssServer(t *testing.T, broken bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if broken {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<rss version="2.0"><channel><title>T</title>`+
+			`<item><title>Feed story</title><link>https://feed.example.com/one</link>`+
+			`<description>d</description><pubDate>2026-09-01T10:00:00Z</pubDate></item>`+
+			`</channel></rss>`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func brokenAlgoliaStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func readRefreshLog(t *testing.T) string {
+	t.Helper()
+	path, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read refresh log: %v", err)
+	}
+	return string(data)
+}
+
+// TestRunRefresh_HeldLockSkipsEveryPool extends the single-flight guard to
+// the multi-pool body: with the following pool ENABLED in config, a held
+// lock must still build neither a Source nor the feed fan-out. The two
+// pre-existing lock tests run with the default (news-only) config and
+// therefore cannot see a following-pool regression.
+func TestRunRefresh_HeldLockSkipsEveryPool(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, false)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+
+	dir, err := cache.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), time.Second)
+	if err != nil {
+		t.Fatalf("test could not take the refresh lock: %v", err)
+	}
+	t.Cleanup(func() { held.Close() })
+
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		t.Errorf("runRefresh built source %q while another refresh held the lock", name)
+		return nil, fmt.Errorf("source %q must not be built", name)
+	}
+	t.Cleanup(func() { newSource = original })
+	failIfFollowingBuilt(t, "while another refresh held the lock")
+
+	if err := runRefresh(); err != nil {
+		t.Errorf("runRefresh() = %v, want nil (another refresh is already in flight)", err)
+	}
+}
+
+// TestRunRefresh_NewsFailureDoesNotBlockFollowing pins R-29's per-pool
+// isolation in the direction that used to be fatal: before this change a
+// news pool that fetched nothing returned an error and the process exited
+// 1 with the following pool never refreshed.
+func TestRunRefresh_NewsFailureDoesNotBlockFollowing(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, false)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+
+	if err := runRefresh(); err != nil {
+		t.Fatalf("runRefresh() = %v, want nil: the following pool succeeded", err)
+	}
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(newsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("feed.json exists after a failed news fetch (stat err = %v); a failed pool must not write", err)
+	}
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := cache.Read(followingPath)
+	if err != nil {
+		t.Fatalf("following.json should have been written: %v", err)
+	}
+	if len(f.Stories) != 1 || f.Stories[0].URL != "https://feed.example.com/one" {
+		t.Errorf("following.json stories = %+v, want the one fetched feed story", f.Stories)
+	}
+}
+
+// TestRunRefresh_FollowingFailureDoesNotBlockNews is the mirror case: the
+// feed server is down, the aggregator is up, and feed.json must still be
+// written with exit status 0.
+func TestRunRefresh_FollowingFailureDoesNotBlockNews(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, true)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+	swapHNSource(t, algoliaStub().URL)
+
+	if err := runRefresh(); err != nil {
+		t.Fatalf("runRefresh() = %v, want nil: the news pool succeeded", err)
+	}
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := cache.Read(newsPath)
+	if err != nil {
+		t.Fatalf("feed.json should have been written: %v", err)
+	}
+	if len(f.Stories) == 0 {
+		t.Error("feed.json has no stories; the news pool wrote an empty cache")
+	}
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("following.json exists after every feed failed (stat err = %v); a failed pool must not write", err)
+	}
+}
+
+// TestRunRefresh_EveryPoolFailingReturnsError is the other half of the new
+// exit contract: exit 1 now means every enabled pool failed, so this is the
+// only shape that may still return an error.
+func TestRunRefresh_EveryPoolFailingReturnsError(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, true)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+
+	if err := runRefresh(); err == nil {
+		t.Fatal("runRefresh() = nil with every enabled pool failing, want an error so the process exits 1")
+	}
+}
+
+// TestRunRefresh_LogLinesCarryPoolNamespaces pins R-29/R-30: FetchAll keys
+// its error map by SOURCE NAME and FetchFeeds keys its own by FEED URL, so
+// every line has to say which namespace it came from or the log is
+// ambiguous the moment a feed host is called "hackernews".
+func TestRunRefresh_LogLinesCarryPoolNamespaces(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, true)
+	feedURL := feeds.URL + "/feed.xml"
+	writeRefreshConfig(t, []string{feedURL}, []string{"hackernews"})
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+
+	_ = runRefresh() // both pools fail; the log is what this test reads
+
+	log := readRefreshLog(t)
+	for _, want := range []string{
+		"news hackernews: ",          // per-source failure, news namespace
+		"news: ",                     // the news pool itself fetched nothing
+		"following " + feedURL + ":", // per-feed failure, following namespace
+		"following: ",                // the following pool itself failed
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("refresh.log missing a %q line:\n%s", want, log)
+		}
+	}
+}
+
+// TestRunRefresh_NewsErrorsReachTheLogWithContext pins the error wrapping
+// the global constraints require of refreshNews. Its two failure paths —
+// multiFetch and writeCache — both end up in refresh.log behind
+// runRefresh's "news: " prefix, and an error returned bare from either
+// site names no operation at all: "news: rename temp cache: ..." leaves a
+// reader guessing which file, and multiFetch's raw error leaves them
+// guessing which stage. Both configs here are news-only, so the failing
+// pool is also the only ACTIVE one and runRefresh must return an error.
+func TestRunRefresh_NewsErrorsReachTheLogWithContext(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+		want  string
+	}{
+		{
+			name: "source cannot be built",
+			setup: func(t *testing.T) {
+				original := newSource
+				newSource = func(name string) (fetch.Source, error) {
+					return nil, errors.New("no such source")
+				}
+				t.Cleanup(func() { newSource = original })
+			},
+			want: "news: fetch aggregators: ",
+		},
+		{
+			name: "cache path is occupied by a directory",
+			setup: func(t *testing.T) {
+				srv := algoliaStub()
+				t.Cleanup(srv.Close)
+				swapHNSource(t, srv.URL)
+				path, err := cache.PoolPath("news")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "news: write feed.json: ",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateXDG(t)
+			writeRefreshConfig(t, nil, []string{"hackernews"})
+			tc.setup(t)
+
+			if err := runRefresh(); err == nil {
+				t.Fatal("runRefresh() = nil with the only active pool failing, want an error")
+			}
+			if log := readRefreshLog(t); !strings.Contains(log, tc.want) {
+				t.Errorf("refresh.log missing a %q line:\n%s", tc.want, log)
+			}
+		})
 	}
 }

@@ -482,31 +482,43 @@ Subcommands:
 `)
 }
 
-// runRefresh fetches every configured source and rewrites the cache. It is
-// single-flight: a cold statusline render and a multi-tab terminal restore
-// can each spawn one, and a try-acquire on a sidecar refresh.lock (timeout
-// 0 — exactly one attempt, no wait) makes the losers return quietly instead
-// of hammering the same sources for the same answer. The lock is held for
-// the whole refresh and released when the process exits.
+// runRefresh refreshes every enabled pool and rewrites their caches. It is
+// single-flight across ALL pools: a cold statusline render and a multi-tab
+// terminal restore can each spawn one, and a try-acquire on a sidecar
+// refresh.lock (timeout 0 — exactly one attempt, no wait) makes the losers
+// return quietly instead of hammering the same sources for the same answer.
+// One process refreshes everything, so one lock is enough. The lock is held
+// for the whole refresh and released when the process exits.
 //
 // Only contention is quiet. A lock that cannot be opened or flocked at all
 // (unwritable cache dir, a filesystem without flock) is a real fault and
 // propagates, so it reaches refreshlog instead of exiting 0 forever with
 // nothing to show for it.
+//
+// Pools refresh SEQUENTIALLY, news first (ruling R-28): a detached process
+// nobody waits on buys nothing from concurrency, and serial order keeps
+// refresh.log readable. Failure is per pool (ruling R-29): every per-pool
+// and per-feed problem is appended to refresh.log under a namespace prefix,
+// a pool that fetched nothing simply does not write and keeps its stale
+// cache, and this function returns an error — the process's exit 1 — only
+// when EVERY ACTIVE pool failed. Active, not merely enabled: a pool R-35
+// skips for having nothing configured inside it is never counted, so a
+// Following-only user does not exit 1 on every refresh. That is a
+// deliberate change to what a non-zero --__refresh exit means: it used to
+// mean "no source produced stories", and now means "no pool did".
 func runRefresh() error {
-	path, err := cache.Path()
+	dir, err := cache.Dir()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
 	lock, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), 0)
 	if err != nil {
 		if errors.Is(err, lockfile.ErrHeld) {
-			// Another refresh is in flight and will warm the cache for
-			// everyone. This one's job is done.
+			// Another refresh is in flight and will warm every pool's cache
+			// for everyone. This one's job is done.
 			return nil
 		}
 		return fmt.Errorf("refresh lock: %w", err)
@@ -520,19 +532,77 @@ func runRefresh() error {
 		}
 	}
 	cfg = config.Validate(cfg, config.FieldSources{}, io.Discard)
+
+	// attempted counts ACTIVE pools — the ones that actually ran. An enabled
+	// pool with nothing configured inside it is skipped rather than counted
+	// as a failure (R-35): it has no work to do, logging one line per
+	// refresh forever would bury the real faults, and counting a skip as a
+	// failure would hand a Following-only user exit 1 on every refresh. The
+	// following skip is also load-bearing — feedstate.Update
+	// garbage-collects every feed absent from its configured list, so
+	// refreshing that pool with no feeds would erase the user's cadence
+	// history and validators.
+	attempted, failed := 0, 0
+	if cfg.NewsActive() {
+		attempted++
+		if err := refreshNews(cfg, time.Now().UTC()); err != nil {
+			failed++
+			_ = refreshlog.Append(fmt.Sprintf("news: %s", err))
+		}
+	}
+	if cfg.FollowingActive() {
+		attempted++
+		if err := refreshFollowing(context.Background(), cfg, time.Now().UTC()); err != nil {
+			failed++
+			_ = refreshlog.Append(fmt.Sprintf("following: %s", err))
+		}
+	}
+	if attempted > 0 && failed == attempted {
+		return fmt.Errorf("every active pool failed to refresh (%d of %d)", failed, attempted)
+	}
+	return nil
+}
+
+// refreshNews fetches the news pool's aggregators and rewrites feed.json.
+// The fetch keeps the 5s budget it has always had — aggregators are single
+// requests to fast JSON APIs, unlike the following pool's fan-out — and the
+// write keeps the full-replace policy: a failed aggregator's prior stories
+// drop out of the cache rather than ghosting indefinitely, self-healing on
+// the next fully-successful refresh. (The following pool merges per feed
+// instead; see mergeFollowingStories for why the two policies differ.)
+//
+// Per-source errors are logged under a "news <source>: " prefix. The prefix
+// is not decoration: FetchAll keys its error map by source name while the
+// following pool's is keyed by feed URL, so an unprefixed line cannot be
+// attributed to a namespace by anyone reading refresh.log later.
+//
+// Every error this function returns is wrapped, for the same reason. The
+// caller pastes it into refresh.log behind "news: ", where a bare "rename
+// temp cache: ..." names neither the stage nor the file it failed on.
+func refreshNews(cfg config.Config, now time.Time) error {
+	path, err := cache.PoolPath("news")
+	if err != nil {
+		return fmt.Errorf("news cache path: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaults.FetchTimeout)
 	defer cancel()
 	stories, errs, err := multiFetch(ctx, cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("fetch aggregators: %w", err)
 	}
 	for name, e := range errs {
-		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
+		_ = refreshlog.Append(fmt.Sprintf("news %s: %s", name, e))
 	}
 	if len(stories) == 0 {
-		return errors.New("all sources returned no stories")
+		// Nothing fetched: leave the stale cache in place rather than
+		// blanking it, and report the pool as failed so the caller can tell
+		// a total outage from a partial one.
+		return errors.New("all aggregators returned no stories")
 	}
-	return writeCache(path, stories, time.Now().UTC())
+	if err := writeCache(path, stories, now); err != nil {
+		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }
 
 // fallbackMessage returns the user-facing string for the offline-render
