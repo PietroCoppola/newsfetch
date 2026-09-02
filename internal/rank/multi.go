@@ -58,7 +58,7 @@ func SelectN(stories []fetch.Story, n int, opts Options, rng *rand.Rand) ([]fetc
 	}
 	all := make([]scored, len(stories))
 	for i, s := range stories {
-		all[i] = scored{s: s, w: Score(s, opts.Topics, opts.Now)}
+		all[i] = scored{s: s, w: effectiveScore(s, opts)}
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].w > all[j].w })
 	if len(all) > pool {

@@ -1,6 +1,7 @@
 package rank
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 	"time"
@@ -324,6 +325,44 @@ func TestSelect_PoolSizeCap_Rank10CanBePicked(t *testing.T) {
 	}
 	if !tenthWon {
 		t.Fatal("rank-10 dominant story never picked; pool may be off-by-one (top-9 instead of top-10)")
+	}
+}
+
+func TestMatchesAnyTopic_SummaryAndHyphens(t *testing.T) {
+	cases := []struct {
+		name   string
+		story  fetch.Story
+		topics []string
+		want   bool
+	}{
+		{"summary token matches", fetch.Story{Title: "Weekly notes", Summary: "mostly about wasm this week"}, []string{"wasm"}, true},
+		{"summary substring does not false-match tokens", fetch.Story{Title: "x", Summary: "wasm"}, []string{"as"}, false},
+		{"hyphenated topic matches spaced text", fetch.Story{Title: "Notes on machine learning at scale"}, []string{"machine-learning"}, true},
+		{"spaced topic matches hyphenated text", fetch.Story{Title: "A machine-learning retrospective"}, []string{"machine learning"}, true},
+		{"hyphenated tag matches spaced topic", fetch.Story{Title: "x", Tags: []string{"machine-learning"}}, []string{"machine learning"}, true},
+		{"no match without any surface hit", fetch.Story{Title: "Databases", Summary: "postgres tips"}, []string{"rust"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchesAnyTopic(tc.story, tc.topics); got != tc.want {
+				t.Errorf("matchesAnyTopic(%+v, %v) = %v, want %v", tc.story, tc.topics, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScore_FollowingUnitPopularity(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	feedStory := fetch.Story{Feed: "https://x/feed", Points: 0, CreatedAt: now.Add(-2 * time.Hour)}
+	// Unit popularity over (2h age + 2h offset)^1.8 — the design's
+	// following formula is recency × cadence × topic, no points term.
+	want := 1.0 / math.Pow(4, 1.8)
+	if got := Score(feedStory, nil, now); math.Abs(got-want) > 1e-12 {
+		t.Errorf("Score(feed story) = %v, want %v (unit popularity, not Points/decay = 0)", got, want)
+	}
+	agg := fetch.Story{Points: 0, CreatedAt: now.Add(-2 * time.Hour)}
+	if got := Score(agg, nil, now); got != 0 {
+		t.Errorf("Score(zero-point aggregator story) = %v, want 0 (aggregators unchanged)", got)
 	}
 }
 

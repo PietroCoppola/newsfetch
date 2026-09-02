@@ -134,6 +134,77 @@ func mustSelectN(t *testing.T, stories []fetch.Story, n int, opts rank.Options, 
 	return got
 }
 
+func TestSelectN_FeedWeightsShiftSelection(t *testing.T) {
+	now := refNow
+	// Identical raw scores: zero points (unit popularity), same age.
+	stories := []fetch.Story{
+		{ID: "busy", URL: "https://busy.com/1", Feed: "https://busy.com/feed", CreatedAt: now.Add(-time.Hour)},
+		{ID: "rare", URL: "https://rare.com/1", Feed: "https://rare.com/feed", CreatedAt: now.Add(-time.Hour)},
+	}
+	opts := rank.Options{Now: now, PoolSize: 2, FeedWeights: map[string]float64{
+		"https://busy.com/feed": 0.2,
+		"https://rare.com/feed": 5.0,
+	}}
+	// 25x weight ratio → rare's share is 25/26 ≈ 0.96. Across 50 seeds,
+	// rare must win the overwhelming majority; a missing multiplier OR
+	// all-zero scores yields ~50/50 and fails decisively.
+	rareWins := 0
+	for seed := int64(0); seed < 50; seed++ {
+		got := mustSelectN(t, stories, 1, opts, rand.New(rand.NewSource(seed)))
+		if got[0].ID == "rare" {
+			rareWins++
+		}
+	}
+	if rareWins < 40 {
+		t.Errorf("rare won %d/50 with a 25x weight advantage; want >= 40", rareWins)
+	}
+}
+
+func TestSelectN_NoFeedWeightIsNeutral(t *testing.T) {
+	now := refNow
+	// Both halves of "no feed weight": an aggregator story with no Feed at
+	// all, and a feed-attributed story whose Feed has no entry in the map
+	// (configured since the last refresh, or never observed). Either way
+	// the multiplier must be a true 1.0 — not 0, which would make the
+	// story unselectable, and not some other feed's weight.
+	//
+	// Points: 1 gives the no-Feed story the same unit numerator Score
+	// substitutes for feed-attributed ones, so within each case the two
+	// candidates differ only by their multiplier.
+	cases := []struct {
+		name string
+		feed string
+	}{
+		{"a story with no Feed at all", ""},
+		{"a story whose Feed has no entry", "https://unmapped/feed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stories := []fetch.Story{
+				{ID: "neutral", URL: "https://a.com/1", Points: 1, Feed: tc.feed, CreatedAt: now.Add(-time.Hour)},
+				{ID: "damped", URL: "https://b.com/1", Feed: "https://damped/feed", CreatedAt: now.Add(-time.Hour)},
+			}
+			opts := rank.Options{Now: now, PoolSize: 2, FeedWeights: map[string]float64{
+				"https://damped/feed": 0.04,
+			}}
+			// Same 25x gap and 50-seed calibration as
+			// TestSelectN_FeedWeightsShiftSelection: neutral's share is
+			// 25/26 ≈ 0.96, so a zeroed or misapplied multiplier fails
+			// decisively rather than marginally.
+			wins := 0
+			for seed := int64(0); seed < 50; seed++ {
+				got := mustSelectN(t, stories, 1, opts, rand.New(rand.NewSource(seed)))
+				if got[0].ID == "neutral" {
+					wins++
+				}
+			}
+			if wins < 40 {
+				t.Errorf("unweighted story won %d/50 against a 0.04-weighted feed; want >= 40 (an absent entry must mean neutral 1.0)", wins)
+			}
+		})
+	}
+}
+
 func makeStories(n int) []fetch.Story {
 	out := make([]fetch.Story, n)
 	for i := 0; i < n; i++ {

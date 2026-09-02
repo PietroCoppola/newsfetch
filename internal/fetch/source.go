@@ -16,11 +16,22 @@ type Story struct {
 	Points    int       `json:"points"`
 	Author    string    `json:"author"`
 	CreatedAt time.Time `json:"created_at"`
-	// Tags are source-provided topic tags (e.g. from Lobste.rs). HN does
-	// not expose topic tags so HackerNews.Fetch populates an empty slice.
-	// The ranker matches topics against title and tags uniformly — see
-	// rank.matchesAnyTopic.
+	// Tags are source-provided topic tags (e.g. from Lobste.rs or RSS
+	// categories). HN does not expose topic tags so HackerNews.Fetch
+	// populates an empty slice. The ranker matches topics against title,
+	// tags, and summary uniformly — see rank.matchesAnyTopic.
 	Tags []string `json:"tags"`
+	// Summary is the item's description/summary text, HTML-stripped and
+	// entity-decoded at parse time. It joins the topic-matching surface
+	// (7 of 14 surveyed feeds carry no categories, so title+tags alone
+	// would leave the majority case matching on title only) but is never
+	// rendered.
+	Summary string `json:"summary"`
+	// Feed is the source feed URL for following-pool items — the cadence
+	// weight's attribution key, and the signal that the story carries no
+	// popularity score (rank.Score uses a unit base when Feed is set).
+	// Empty for aggregator sources.
+	Feed string `json:"feed"`
 }
 
 // FetchOptions carries per-call tuning for [Source.Fetch]. The zero value

@@ -19,7 +19,7 @@ import (
 
 // SchemaVersion identifies the on-disk layout. Bump it when File gains or
 // loses a field, or when an existing field changes semantics.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // File is the on-disk cache layout. JSON tags are part of the schema
 // contract.

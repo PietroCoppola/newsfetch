@@ -4,8 +4,8 @@
 // # Source contract
 //
 // A Source is a stateless client for a single upstream provider (Hacker News
-// via Algolia and Lobste.rs today; RSS and GitHub Trending are planned for
-// later milestones). Implementations must follow these rules:
+// via Algolia and Lobste.rs today; GitHub Trending is planned for a later
+// milestone). Implementations must follow these rules:
 //
 //   - Constructors do no I/O. All network access happens inside Fetch.
 //   - Fetch honours the context's deadline and cancellation. Callers rely on
@@ -21,11 +21,20 @@
 //   - Name returns a short, stable identifier (such as "hackernews") that is
 //     safe to embed in cache entries and user-visible output.
 //
+// RSS and Atom live in this package too, as [Following]: a fan-out client
+// over the user's configured feeds, built on the parser in feedparse.go.
+// It is the deliberate exception to the contract above — it does not
+// implement Source, because the "never a partial slice with a non-nil
+// error" promise cannot express a 304 (unchanged is not empty) or
+// per-feed partial failure, both of which the following pool's refresh
+// pipeline needs (design doc addendum §14). Its entry point is FetchFeeds,
+// not Fetch.
+//
 // # Hot-path discipline
 //
-// Implementations may depend on net/http, encoding/json, and the stdlib time
-// package. Any additional third-party dependency needs justification: a
-// stdlib alternative considered and ruled out, with the reason recorded in
-// the commit message. The fetcher runs off the render hot path, but binary
-// size still affects startup cost.
+// Implementations may depend on net/http, encoding/json, encoding/xml, and
+// the stdlib time package. Any additional third-party dependency needs
+// justification: a stdlib alternative considered and ruled out, with the
+// reason recorded in the commit message. The fetcher runs off the render
+// hot path, but binary size still affects startup cost.
 package fetch
