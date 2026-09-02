@@ -2,6 +2,8 @@ package config_test
 
 import (
 	"bytes"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1013,6 +1015,292 @@ func TestValidate_FollowingCountClamped(t *testing.T) {
 			warned := strings.Contains(buf.String(), "following_count")
 			if warned != tc.wantWarn {
 				t.Errorf("warned = %v, want %v; output %q", warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// TestValidate_FeedURLShapes pins which feeds survive. The check is syntax
+// only — a reachability probe on the render hot path is not on the table —
+// so anything that is not an absolute http/https URL with a host is dropped
+// rather than handed to the fetcher to fail slowly.
+func TestValidate_FeedURLShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		keep bool
+	}{
+		{"https feed", "https://a.example/feed.xml", true},
+		{"http feed", "http://a.example/feed.xml", true},
+		{"empty", "", false},
+		{"whitespace only", "   ", false},
+		{"relative", "example.com/feed.xml", false},
+		{"protocol relative", "//example.com/feed.xml", false},
+		{"ftp scheme", "ftp://example.com/feed.xml", false},
+		{"no host", "http://", false},
+		{"unparseable escape", "http://%zz", false},
+		{"unparseable host", "http://[::1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Pools = []string{"news", "following"}
+			cfg.Following.Feeds = []config.FeedConfig{{URL: tc.url}}
+			var buf bytes.Buffer
+			got := config.Validate(cfg, config.FieldSources{}, &buf)
+			if tc.keep {
+				if len(got.Following.Feeds) != 1 {
+					t.Fatalf("feed %q was dropped; want kept. warning: %q", tc.url, buf.String())
+				}
+				if buf.Len() != 0 {
+					t.Errorf("a good feed must be silent; got %q", buf.String())
+				}
+				return
+			}
+			if len(got.Following.Feeds) != 0 {
+				t.Fatalf("feed %q survived; want dropped", tc.url)
+			}
+			if !strings.Contains(buf.String(), "dropped") {
+				t.Errorf("warning should say the feed was dropped; got %q", buf.String())
+			}
+		})
+	}
+}
+
+// TestValidate_FeedKnobBoundaries walks every boundary of the two per-feed
+// knobs. Zero is the "unset" spelling for both and must stay silent; the
+// out-of-range values Load marks (an explicitly typed 0 becomes a negative)
+// must be corrected and counted.
+func TestValidate_FeedKnobBoundaries(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         config.FeedConfig
+		wantItems  int
+		wantWeight float64
+		wantWarn   bool
+	}{
+		{"both unset", config.FeedConfig{URL: "https://a.example/f.xml"}, 0, 0, false},
+		{"max_items at min", config.FeedConfig{URL: "https://a.example/f.xml", MaxItems: 1}, 1, 0, false},
+		{"max_items at max", config.FeedConfig{URL: "https://a.example/f.xml", MaxItems: 10}, 10, 0, false},
+		{"max_items above max", config.FeedConfig{URL: "https://a.example/f.xml", MaxItems: 11}, 10, 0, true},
+		{"max_items typed zero", config.FeedConfig{URL: "https://a.example/f.xml", MaxItems: -1}, 1, 0, true},
+		{"max_items negative", config.FeedConfig{URL: "https://a.example/f.xml", MaxItems: -7}, 1, 0, true},
+		{"weight just above zero", config.FeedConfig{URL: "https://a.example/f.xml", Weight: 0.1}, 0, 0.1, false},
+		{"weight at max", config.FeedConfig{URL: "https://a.example/f.xml", Weight: 5.0}, 0, 5.0, false},
+		{"weight above max", config.FeedConfig{URL: "https://a.example/f.xml", Weight: 5.1}, 0, 5.0, true},
+		{"weight typed zero", config.FeedConfig{URL: "https://a.example/f.xml", Weight: -1}, 0, 0, true},
+		{"weight negative", config.FeedConfig{URL: "https://a.example/f.xml", Weight: -0.1}, 0, 0, true},
+		// TOML spells these `nan` / `inf` / `-inf` and BurntSushi/toml
+		// decodes all three into a float64 without an error, so they reach
+		// Validate from a real config file. Every comparison against NaN is
+		// false, so a range check alone lets NaN through untouched and the
+		// settings writer then emits it back as an invalid literal.
+		{"weight NaN", config.FeedConfig{URL: "https://a.example/f.xml", Weight: math.NaN()}, 0, 0, true},
+		{"weight +Inf", config.FeedConfig{URL: "https://a.example/f.xml", Weight: math.Inf(1)}, 0, 0, true},
+		{"weight -Inf", config.FeedConfig{URL: "https://a.example/f.xml", Weight: math.Inf(-1)}, 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Pools = []string{"news", "following"}
+			cfg.Following.Feeds = []config.FeedConfig{tc.in}
+			var buf bytes.Buffer
+			got := config.Validate(cfg, config.FieldSources{}, &buf)
+			if len(got.Following.Feeds) != 1 {
+				t.Fatalf("feed was dropped; want kept and clamped. warning: %q", buf.String())
+			}
+			f := got.Following.Feeds[0]
+			if f.MaxItems != tc.wantItems {
+				t.Errorf("MaxItems = %d, want %d", f.MaxItems, tc.wantItems)
+			}
+			if f.Weight != tc.wantWeight {
+				t.Errorf("Weight = %v, want %v", f.Weight, tc.wantWeight)
+			}
+			warned := buf.Len() != 0
+			if warned != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; output %q", warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// TestValidate_FeedWarningsAggregate pins the single-warning budget across
+// many bad feeds: one line, counts rather than a list of URLs, and each
+// distinct reason named once.
+func TestValidate_FeedWarningsAggregate(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.Following.Feeds = []config.FeedConfig{
+		{URL: "example.com/one.xml"},
+		{URL: "example.com/two.xml"},
+		{URL: "https://good.example/f.xml", MaxItems: 99},
+		{URL: "https://also.example/f.xml"},
+	}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if len(got.Following.Feeds) != 2 {
+		t.Fatalf("kept %d feeds, want 2", len(got.Following.Feeds))
+	}
+	out := buf.String()
+	lines := strings.Count(strings.TrimRight(out, "\n"), "\n") + 1
+	if lines != 1 {
+		t.Errorf("warning lines = %d, want 1; got %q", lines, out)
+	}
+	if !strings.Contains(out, "2 feeds dropped") {
+		t.Errorf("warning should count the drops; got %q", out)
+	}
+	if !strings.Contains(out, "1 feed adjusted") {
+		t.Errorf("warning should count the clamps; got %q", out)
+	}
+	if strings.Count(out, "invalid url") != 1 {
+		t.Errorf("a repeated reason should be named once; got %q", out)
+	}
+}
+
+// TestValidate_FeedWarningIsLast pins the cascade position: a malformed feed
+// must never mask a warning the user is more likely to act on, and the feed
+// correction still happens either way.
+func TestValidate_FeedWarningIsLast(t *testing.T) {
+	base := func() config.Config {
+		cfg := config.Defaults()
+		cfg.Pools = []string{"news", "following"}
+		cfg.Following.Feeds = []config.FeedConfig{{URL: "not a url"}}
+		return cfg
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*config.Config)
+		src     config.FieldSources
+		wantSub string
+	}{
+		{"style wins", func(c *config.Config) { c.Style = "wat" }, config.FieldSources{Style: "config"}, "unknown style"},
+		{"ttl wins", func(c *config.Config) { c.CacheTTL = time.Minute }, config.FieldSources{}, "cache_ttl_minutes"},
+		{"count wins", func(c *config.Config) { c.Count = 99 }, config.FieldSources{Count: "config"}, "count=99"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			tc.mutate(&cfg)
+			var buf bytes.Buffer
+			got := config.Validate(cfg, tc.src, &buf)
+			out := buf.String()
+			lines := strings.Count(strings.TrimRight(out, "\n"), "\n") + 1
+			if lines != 1 {
+				t.Errorf("warning lines = %d, want 1; got %q", lines, out)
+			}
+			if !strings.Contains(out, tc.wantSub) {
+				t.Errorf("expected %q to win precedence; got %q", tc.wantSub, out)
+			}
+			if len(got.Following.Feeds) != 0 {
+				t.Errorf("the bad feed survived silent correction: %+v", got.Following.Feeds)
+			}
+		})
+	}
+}
+
+// TestValidate_FeedsCheckedWhileFollowingDisabled pins that feed rules do
+// not depend on the pool being enabled. One code path, and the warning is
+// about the config file — which is what the user edits, whether or not they
+// have turned the pool on yet.
+func TestValidate_FeedsCheckedWhileFollowingDisabled(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news"}
+	cfg.Following.Feeds = []config.FeedConfig{
+		{URL: "ftp://example.com/f.xml"},
+		{URL: "https://good.example/f.xml", MaxItems: 42},
+	}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if len(got.Following.Feeds) != 1 {
+		t.Fatalf("kept %d feeds, want 1", len(got.Following.Feeds))
+	}
+	if got.Following.Feeds[0].MaxItems != 10 {
+		t.Errorf("MaxItems = %d, want 10 (clamped even with the pool off)", got.Following.Feeds[0].MaxItems)
+	}
+	if !strings.Contains(buf.String(), "1 feed dropped") {
+		t.Errorf("warning missing: %q", buf.String())
+	}
+}
+
+// TestValidate_FeedSpecsAfterValidate closes the loop between validation and
+// the fetch layer: what FeedSpecs hands the fan-out is the corrected list,
+// never the raw one.
+func TestValidate_FeedSpecsAfterValidate(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.Following.Feeds = []config.FeedConfig{
+		{URL: "nonsense"},
+		{URL: "https://good.example/f.xml", MaxItems: 99},
+	}
+	got := config.Validate(cfg, config.FieldSources{}, io.Discard)
+	want := []fetch.FeedSpec{{URL: "https://good.example/f.xml", MaxItems: 10}}
+	if !reflect.DeepEqual(got.FeedSpecs(), want) {
+		t.Errorf("FeedSpecs() = %+v, want %+v", got.FeedSpecs(), want)
+	}
+	if !reflect.DeepEqual(got.FeedURLs(), []string{"https://good.example/f.xml"}) {
+		t.Errorf("FeedURLs() = %v, want the surviving feed only", got.FeedURLs())
+	}
+}
+
+// TestValidate_Idempotent pins the property the statusline path depends on:
+// it validates a second time against io.Discard, so a Validate that kept
+// changing its own output would make the two renders disagree. pool_order's
+// permutation normalisation is the non-trivial part — appending the pools a
+// user left out must not append them again on the second pass.
+func TestValidate_Idempotent(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func() config.Config
+	}{
+		{"defaults", config.Defaults},
+		{"unknown pool and a scrambled order", func() config.Config {
+			c := config.Defaults()
+			c.Pools = []string{"following", "repos", "news"}
+			c.PoolOrder = []string{"repos", "news"}
+			c.Following.Feeds = []config.FeedConfig{validFeed()}
+			return c
+		}},
+		{"missing pool appended to the order", func() config.Config {
+			c := config.Defaults()
+			c.Pools = []string{"news", "following"}
+			c.PoolOrder = []string{"news"}
+			c.Following.Feeds = []config.FeedConfig{validFeed()}
+			return c
+		}},
+		{"everything empty", func() config.Config {
+			c := config.Defaults()
+			c.Pools = nil
+			c.PoolOrder = nil
+			c.News.Aggregators = nil
+			return c
+		}},
+		{"bad feeds and bad knobs", func() config.Config {
+			c := config.Defaults()
+			c.Pools = []string{"news", "following"}
+			c.PoolOrder = []string{"following"}
+			c.Following.Feeds = []config.FeedConfig{
+				{URL: "nope"},
+				{URL: "https://a.example/f.xml", MaxItems: 99, Weight: 9},
+			}
+			c.FollowingCount = 0
+			c.Count = 99
+			c.CacheTTL = time.Minute
+			c.DedupWindow = -time.Hour
+			c.TickerMarker = "spiral"
+			return c
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var first bytes.Buffer
+			once := config.Validate(tc.build(), config.FieldSources{}, &first)
+			var second bytes.Buffer
+			twice := config.Validate(once, config.FieldSources{}, &second)
+			if !reflect.DeepEqual(twice, once) {
+				t.Errorf("Validate is not idempotent:\nonce:  %+v\ntwice: %+v", once, twice)
+			}
+			if second.Len() != 0 {
+				t.Errorf("second pass warned about an already-corrected config: %q", second.String())
 			}
 		})
 	}

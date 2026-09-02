@@ -3,6 +3,9 @@ package config
 import (
 	"fmt"
 	"io"
+	"math"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
@@ -351,13 +354,112 @@ func knownSource(name string) bool {
 }
 
 // splitFeeds returns the usable feeds with their per-feed knobs clamped,
-// plus everything that went wrong along the way. Step 6 of this task fills
-// in the per-feed rules.
+// plus everything that went wrong along the way. Feeds are dropped rather
+// than repaired when their URL is unusable — there is no sensible guess at
+// what a user meant by a relative path — while an out-of-range knob keeps
+// the feed and clamps the number, because the URL is the part that carries
+// the intent.
 func splitFeeds(feeds []FeedConfig) ([]FeedConfig, feedIssues) {
 	var out []FeedConfig
 	var iss feedIssues
-	out = append(out, feeds...)
+	for _, f := range feeds {
+		if reason := feedURLProblem(f.URL); reason != "" {
+			iss.dropped++
+			iss.dropReasons = appendUnique(iss.dropReasons, reason)
+			continue
+		}
+		var reasons []string
+		// Zero means unset for both knobs and is left alone; Load turns a
+		// value the user actually typed as 0 into a negative so it lands
+		// here instead of passing for "absent".
+		if f.MaxItems != 0 && (f.MaxItems < defaults.MinFeedItems || f.MaxItems > defaults.MaxFeedItems) {
+			f.MaxItems = clampFeedItems(f.MaxItems)
+			reasons = append(reasons, fmt.Sprintf("max_items out of [%d, %d]", defaults.MinFeedItems, defaults.MaxFeedItems))
+		}
+		// The non-finite tests come first and are not redundant: TOML has
+		// `nan` and `inf` literals that BurntSushi/toml decodes into a
+		// float64 without complaint, and every comparison against NaN is
+		// false, so a NaN weight would pass the range check untouched and be
+		// written straight back out by --settings as an invalid literal.
+		if math.IsNaN(f.Weight) || math.IsInf(f.Weight, 0) || f.Weight < 0 || f.Weight > defaults.MaxFeedWeight {
+			f.Weight = clampFeedWeight(f.Weight)
+			reasons = append(reasons, fmt.Sprintf("weight out of (0, %g]", defaults.MaxFeedWeight))
+		}
+		if len(reasons) > 0 {
+			// Counted once per feed, not once per knob: the user thinks in
+			// feeds, and "3 feeds adjusted" for two bad feeds would be a
+			// lie in the direction of alarm.
+			iss.adjusted++
+			for _, r := range reasons {
+				iss.adjustReasons = appendUnique(iss.adjustReasons, r)
+			}
+		}
+		out = append(out, f)
+	}
 	return out, iss
+}
+
+// feedURLProblem returns the reason a feed URL is unusable, or "" when it is
+// fine. The check is deliberately shallow — syntax only, never a network
+// round trip — because config validation runs on the render hot path, and
+// because a reachability failure is a runtime condition rather than a config
+// mistake.
+func feedURLProblem(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "empty url"
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "invalid url"
+	}
+	if u.Scheme == "" {
+		// A relative or protocol-relative reference: there is no host to
+		// fetch from, so this reads as a typo rather than a wrong scheme.
+		return "invalid url"
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "unsupported url scheme"
+	}
+	if u.Host == "" {
+		return "invalid url"
+	}
+	return ""
+}
+
+// clampFeedItems snaps a typed max_items into [MinFeedItems, MaxFeedItems].
+// Callers never pass 0: that is the unset spelling and takes the fetch
+// layer's built-in cap instead.
+func clampFeedItems(n int) int {
+	if n < defaults.MinFeedItems {
+		return defaults.MinFeedItems
+	}
+	if n > defaults.MaxFeedItems {
+		return defaults.MaxFeedItems
+	}
+	return n
+}
+
+// clampFeedWeight snaps a typed weight into (0, MaxFeedWeight]. A
+// non-positive weight is dropped back to 0 — "no manual override", so the
+// feed falls through to its auto cadence weight — rather than clamped up to
+// some arbitrary smallest positive number: the range is open at zero, so
+// there is no nearest valid value on that side to clamp to.
+func clampFeedWeight(f float64) float64 {
+	// NaN and ±Inf land here from a `weight = nan` / `weight = inf` config
+	// file and must be tested for by name, since NaN compares false against
+	// every bound. All three drop the override rather than clamping to the
+	// cap: an infinite weight is a typo, not a request for the maximum, and
+	// there is no nearest valid value for NaN at all.
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+	if f < 0 {
+		return 0
+	}
+	if f > defaults.MaxFeedWeight {
+		return defaults.MaxFeedWeight
+	}
+	return f
 }
 
 // feedIssues accumulates every per-feed problem in one config so Validate
@@ -372,8 +474,40 @@ type feedIssues struct {
 func (f feedIssues) any() bool { return f.dropped > 0 || f.adjusted > 0 }
 
 // warning renders the single line Validate prints for every feed problem in
-// the file at once, e.g. "2 feeds dropped: invalid url".
-func (f feedIssues) warning() string { return "" }
+// the file at once, e.g. "2 feeds dropped: invalid url". Counts rather than
+// a list of URLs: the user has the file open and one distinct reason is all
+// they need to find them.
+func (f feedIssues) warning() string {
+	var parts []string
+	if f.dropped > 0 {
+		parts = append(parts, fmt.Sprintf("%s dropped: %s", plural(f.dropped, "feed"), strings.Join(f.dropReasons, ", ")))
+	}
+	if f.adjusted > 0 {
+		parts = append(parts, fmt.Sprintf("%s adjusted: %s", plural(f.adjusted, "feed"), strings.Join(f.adjustReasons, ", ")))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// plural renders "1 feed" / "2 feeds" so the aggregated warning reads like a
+// sentence instead of "1 feed(s)".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// appendUnique appends s unless list already holds it, preserving
+// first-seen order. Three feeds with three unparseable URLs are one problem
+// the user fixes once, so the reason is named once.
+func appendUnique(list []string, s string) []string {
+	for _, existing := range list {
+		if existing == s {
+			return list
+		}
+	}
+	return append(list, s)
+}
 
 // sourceLabel renders the human-readable origin tag in a warning. flagName
 // is the long flag name without leading dashes (e.g. "style", "count");
