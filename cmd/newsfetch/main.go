@@ -26,7 +26,6 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/history"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
-	"github.com/PietroCoppola/newsfetch/internal/rank"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
 	"github.com/PietroCoppola/newsfetch/internal/render"
 )
@@ -207,9 +206,10 @@ func promptYesNo(in *os.File, out io.Writer) func(string) bool {
 	}
 }
 
-// runDefault is the hot path. It parses flags, loads and validates config,
-// reads the cache, and prints a rendered story (or a fallback). Callers
-// pass an rng so tests can seed determinism.
+// runDefault is the hot path. It parses flags, loads and validates
+// config, assembles every enabled pool from its own cache, and prints the
+// stacked render (or a fallback). Callers pass an rng so tests can seed
+// determinism.
 func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	cfg, cli, earlyExit, err := parseAndLoad(args, errOut)
 	if err != nil {
@@ -228,57 +228,26 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 		return runStatusline(out, errOut, cfg, cli, rng)
 	}
 
-	path, err := cache.Path()
-	if err != nil {
-		return err
-	}
+	// One clock reading for the whole invocation, so every pool's relative
+	// ages, the dedup gate and the history entries all agree.
 	now := time.Now().UTC()
 	seen := loadSeen(cfg, now, errOut)
-	f, readErr := cache.Read(path)
-	if readErr == nil && len(f.Stories) > 0 {
-		picked, err := selectFromPool(f.Stories, seen, cfg, now, rng)
-		if err != nil {
-			return err
-		}
-		if err := writeStories(out, picked, cfg, now); err != nil {
-			return err
-		}
-		recordHistory(picked, now, errOut)
-		if !f.IsFresh(cfg.CacheTTL, now) {
-			spawnRefresh()
-		}
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), defaults.FetchTimeout)
-	defer cancel()
-	stories, errs, err := multiFetch(ctx, cfg)
+	pools, rendered, err := assemblePools(cfg, seen, now, rng, errOut)
 	if err != nil {
 		return err
 	}
-	for name, e := range errs {
-		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
-	}
-	if len(stories) == 0 {
-		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg.News.Aggregators)))
+	if len(rendered) == 0 {
+		// Every active pool came up empty — cold caches with a failed
+		// cold fetch, or nothing left after the two-pass selection. Same
+		// fallback the single-pool path printed, with a pools-aware
+		// message (R-21).
+		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg)))
 		return nil
 	}
-	picked, err := selectFromPool(stories, seen, cfg, now, rng)
-	if err != nil {
+	if err := writePools(out, pools, cfg, now); err != nil {
 		return err
 	}
-	if err := writeStories(out, picked, cfg, now); err != nil {
-		return err
-	}
-	recordHistory(picked, now, errOut)
-	// Full-replace on partial fetch: a failed source's prior stories drop
-	// out of the cache rather than ghosting indefinitely. Self-healing on
-	// the next fully-successful refresh. Time-bounded merge (per-story TTL
-	// on top of cache TTL) is the right shape if the partial-outage UX
-	// ever feels rough — defer until evidence demands it.
-	if writeErr := writeCache(path, stories, time.Now().UTC()); writeErr != nil {
-		fmt.Fprintln(errOut, "newsfetch: warning: could not write cache:", writeErr)
-	}
+	recordHistory(rendered, now, errOut)
 	return nil
 }
 
@@ -306,27 +275,6 @@ func loadSeen(cfg config.Config, now time.Time, errOut io.Writer) map[string]str
 		return map[string]struct{}{}
 	}
 	return f.RecentHashSet(now, cfg.DedupWindow)
-}
-
-// selectFromPool pre-filters pool against seen, then picks cfg.Count
-// stories with diversity-aware multi-selection. If every story in the
-// pool has been seen, the filter is bypassed so the user gets a render
-// rather than the offline fallback — eventual repeats beat eventual
-// silence.
-func selectFromPool(pool []fetch.Story, seen map[string]struct{}, cfg config.Config, now time.Time, rng *rand.Rand) ([]fetch.Story, error) {
-	candidates := rank.Filter(pool, seen)
-	if len(candidates) == 0 {
-		candidates = pool
-	}
-	picked, err := rank.SelectN(candidates, cfg.Count, rank.Options{
-		Topics:   cfg.Topics,
-		Now:      now,
-		PoolSize: defaults.RankPoolSize,
-	}, rng)
-	if err != nil {
-		return nil, fmt.Errorf("select stories: %w", err)
-	}
-	return picked, nil
 }
 
 // recordHistory appends the rendered stories to seen.json in render order
@@ -605,23 +553,6 @@ func refreshNews(cfg config.Config, now time.Time) error {
 	return nil
 }
 
-// fallbackMessage returns the user-facing string for the offline-render
-// branch. With exactly one configured source, name it explicitly so the
-// user knows which provider to investigate; with multiple, stay generic
-// since blaming any one of them would be wrong.
-//
-// "Single source" here means singly-CONFIGURED, not the case where the
-// user has multiple sources but only one is currently failing. M8 polish
-// could distinguish — partial-failure messaging is one of the levers — but
-// for M4 we treat configured-count as the signal because it's stable per
-// invocation and doesn't need to peek at the errs map at the render site.
-func fallbackMessage(sources []string) string {
-	if len(sources) == 1 {
-		return fmt.Sprintf("%s unavailable — check your connection", sources[0])
-	}
-	return defaults.FallbackMessage
-}
-
 // multiFetch instantiates each Source named in cfg.News.Aggregators and
 // runs them in parallel via fetch.FetchAll. Per-source errors flow back as
 // a name→err map; the caller decides whether to log them, surface to the
@@ -652,48 +583,6 @@ func writeCache(path string, stories []fetch.Story, at time.Time) error {
 		FetchedAt:       at,
 		Stories:         stories,
 	})
-}
-
-// writeStories dispatches to the renderer named by cfg.Style for one or
-// more stories. The caller has already validated cfg fields; any unknown
-// style falls back to boxed (belt-and-suspenders).
-//
-// Per-style multi-story behaviour:
-//
-//   - boxed:   render.Multi handles single-story (delegates to Boxed) and
-//     multi-story (hero + ticker) uniformly.
-//   - minimal: N stacked minimal lines (literal repetition, no decoration).
-//   - json:    a uniform top-level array with a pool field on every
-//     object (R-3). The bare-object-at-count-1 shape is gone.
-func writeStories(out io.Writer, stories []fetch.Story, cfg config.Config, now time.Time) error {
-	if len(stories) == 0 {
-		return nil
-	}
-	switch cfg.Style {
-	case "minimal":
-		for _, s := range stories {
-			fmt.Fprint(out, render.Minimal(s, now))
-		}
-	case "json":
-		// Single-pool call site: everything reaching writeStories today
-		// came out of the news cache. Pool-aware dispatch lands with
-		// writePools.
-		fmt.Fprint(out, render.JSONPools([]render.Pool{{
-			Name:    "news",
-			Label:   defaults.PoolLabel("news"),
-			Stories: stories,
-		}}, now))
-	default:
-		rendered, err := render.Multi(stories, now, defaults.TermWidth(defaults.BoxWidth), render.MultiOptions{
-			Marker: render.TickerMarker(cfg.TickerMarker),
-			Boxed:  cfg.TickerBoxed,
-		})
-		if err != nil {
-			return fmt.Errorf("render: %w", err)
-		}
-		fmt.Fprint(out, rendered)
-	}
-	return nil
 }
 
 // spawnRefresh launches the detached background refresh. Tests MAY swap

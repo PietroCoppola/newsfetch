@@ -96,9 +96,14 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 	}
 
 	seen := loadSeen(cfg, now, errOut)
-	cfgOne := cfg
-	cfgOne.Count = 1
-	picked, err := selectFromPool(f.Stories, seen, cfgOne, now, rng)
+	// The statusline renders one story from the news cache with the
+	// all-seen bypass on — today's behaviour, unchanged. Task 14 replaces
+	// this with the following→news precedence pick.
+	picked, err := selectFromPool(poolPick{
+		Name:    "news",
+		Stories: f.Stories,
+		Count:   1,
+	}, seen, cfg, true, now, rng)
 	if err != nil {
 		return err
 	}
@@ -132,9 +137,14 @@ func selectPinnedStory(cfg config.Config, errOut io.Writer, rng *rand.Rand, pin 
 		return session.Entry{}, errNoCachedStories
 	}
 	seen := loadSeen(cfg, now, errOut)
-	cfgOne := cfg
-	cfgOne.Count = 1
-	picked, err := selectFromPool(f.Stories, seen, cfgOne, now, rng)
+	// The statusline renders one story from the news cache with the
+	// all-seen bypass on — today's behaviour, unchanged. Task 14 replaces
+	// this with the following→news precedence pick.
+	picked, err := selectFromPool(poolPick{
+		Name:    "news",
+		Stories: f.Stories,
+		Count:   1,
+	}, seen, cfg, true, now, rng)
 	if err != nil {
 		return session.Entry{}, err
 	}

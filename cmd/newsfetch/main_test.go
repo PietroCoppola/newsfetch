@@ -21,6 +21,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
+	"github.com/PietroCoppola/newsfetch/internal/render"
 )
 
 // isolateXDG points every XDG root (and HOME, which the XDG fallbacks
@@ -138,33 +139,6 @@ func TestParseAndLoad_NegativeMaxWidthMeansAuto(t *testing.T) {
 	}
 	if cli.maxWidth != 0 {
 		t.Errorf("maxWidth = %d, want 0 (auto)", cli.maxWidth)
-	}
-}
-
-func TestFallbackMessage_SingleSourceNamed(t *testing.T) {
-	got := fallbackMessage([]string{"lobsters"})
-	if !strings.Contains(got, "lobsters") {
-		t.Errorf("single-source fallback should name the source; got %q", got)
-	}
-	if !strings.Contains(got, "check your connection") {
-		t.Errorf("fallback should keep the connection hint; got %q", got)
-	}
-}
-
-func TestFallbackMessage_MultiSourceGeneric(t *testing.T) {
-	got := fallbackMessage([]string{"hackernews", "lobsters"})
-	if got != defaults.FallbackMessage {
-		t.Errorf("multi-source fallback = %q, want default %q", got, defaults.FallbackMessage)
-	}
-}
-
-func TestFallbackMessage_NoSourcesGeneric(t *testing.T) {
-	// Defence-in-depth: cfg.News.Aggregators should never be empty
-	// post-Validate, but if it ever is, the generic message is the safe
-	// choice.
-	got := fallbackMessage(nil)
-	if got != defaults.FallbackMessage {
-		t.Errorf("nil-sources fallback = %q, want default", got)
 	}
 }
 
@@ -870,5 +844,124 @@ func TestRunRefresh_FollowingEnabledButEmptyDoesNotMaskNewsFailure(t *testing.T)
 	}
 	if log := refreshLogOrEmpty(t); strings.Contains(log, "following") {
 		t.Errorf("refresh.log has a following-pool line for a pool with nothing configured (enabled != active):\n%s", log)
+	}
+}
+
+// TestRunDefault_SinglePoolRenderIsByteExact is the header-leak guard.
+// TestRunDefault_RendersFromFreshCache above asserts substrings only and
+// would pass happily with a "╭─ News ─╮" header printed over the box; the
+// single-pool experience must stay byte-identical to the pre-pool render,
+// which means a bare render.Boxed and nothing else.
+func TestRunDefault_SinglePoolRenderIsByteExact(t *testing.T) {
+	isolateXDG(t)
+	original := spawnRefresh
+	spawnRefresh = func() { t.Error("fresh cache must not spawn a refresh") }
+	t.Cleanup(func() { spawnRefresh = original })
+
+	now := time.Now().UTC()
+	story := fetch.Story{
+		ID:        "hn-1",
+		Title:     "A seeded story",
+		URL:       "https://example.com/x",
+		Source:    "hackernews",
+		Points:    100,
+		Author:    "alice",
+		CreatedAt: now.Add(-2 * time.Hour),
+		Tags:      []string{},
+	}
+	path, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("cache.PoolPath: %v", err)
+	}
+	if err := cache.Write(path, &cache.File{
+		Version:         cache.SchemaVersion,
+		CachedByVersion: defaults.Version,
+		FetchedAt:       now.Add(-5 * time.Minute),
+		Stories:         []fetch.Story{story},
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := runDefault(&buf, io.Discard, nil, rand.New(rand.NewSource(1))); err != nil {
+		t.Fatalf("runDefault: %v", err)
+	}
+	want := render.Boxed(story, now, defaults.TermWidth(defaults.BoxWidth))
+	if buf.String() != want {
+		t.Errorf("single-pool render is no longer byte-identical to Boxed\n got: %q\nwant: %q", buf.String(), want)
+	}
+}
+
+// TestRunDefault_TwoPoolsStackInPoolOrder is the end-to-end counterpart:
+// two seeded cache files, two labelled boxes, following first.
+func TestRunDefault_TwoPoolsStackInPoolOrder(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	original := spawnRefresh
+	spawnRefresh = func() {}
+	t.Cleanup(func() { spawnRefresh = original })
+
+	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	toml := `pools = ["news", "following"]
+pool_order = ["following", "news"]
+count = 1
+following_count = 1
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://a.example/feed.xml"
+`
+	if err := os.WriteFile(cfgPath, []byte(toml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	now := time.Now().UTC()
+	writePool := func(pool string, stories []fetch.Story) {
+		p, err := cache.PoolPath(pool)
+		if err != nil {
+			t.Fatalf("cache.PoolPath(%q): %v", pool, err)
+		}
+		if err := cache.Write(p, &cache.File{
+			Version:         cache.SchemaVersion,
+			CachedByVersion: defaults.Version,
+			FetchedAt:       now.Add(-time.Minute),
+			Stories:         stories,
+		}); err != nil {
+			t.Fatalf("seed %s cache: %v", pool, err)
+		}
+	}
+	writePool("news", []fetch.Story{{
+		ID: "hn-1", Title: "React 21 drops with native signals",
+		URL: "https://reactjs.org/", Source: "hackernews", Points: 400,
+		CreatedAt: now.Add(-2 * time.Hour), Tags: []string{},
+	}})
+	writePool("following", []fetch.Story{{
+		ID: "f-1", Title: "The case for slow blogging",
+		URL: "https://drewdevault.com/slow", Source: "following",
+		Feed:      "https://a.example/feed.xml",
+		CreatedAt: now.Add(-48 * time.Hour), Tags: []string{},
+	}})
+
+	var stdout, stderr bytes.Buffer
+	if err := runDefault(&stdout, &stderr, nil, rand.New(rand.NewSource(1))); err != nil {
+		t.Fatalf("runDefault: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	followingAt := strings.Index(out, "╭─ Following ─")
+	newsAt := strings.Index(out, "╭─ News ─")
+	if followingAt < 0 || newsAt < 0 {
+		t.Fatalf("expected both labelled box headers; got:\n%s", out)
+	}
+	if followingAt > newsAt {
+		t.Errorf("pools stacked out of pool_order; got:\n%s", out)
+	}
+	for _, want := range []string{"The case for slow blogging", "React 21 drops with native signals"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output:\n%s", want, out)
+		}
 	}
 }
