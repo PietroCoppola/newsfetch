@@ -721,3 +721,146 @@ func TestRunRefresh_NewsErrorsReachTheLogWithContext(t *testing.T) {
 		})
 	}
 }
+
+// writeRefreshConfigExplicitPools writes a config.toml with a caller-chosen
+// pools list, independent of whether news or following actually has
+// content. writeRefreshConfig infers pools from whether feedURLs is empty
+// and so can never express "pool enabled, pool empty" for following (its
+// pools list drops "following" outright when there are no feeds) — exactly
+// the shape the enabled-vs-active tests below need, because that shape is
+// the one PoolEnabled and NewsActive/FollowingActive disagree on.
+func writeRefreshConfigExplicitPools(t *testing.T, pools, feedURLs, aggregators []string) {
+	t.Helper()
+	path, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	quoted := make([]string, len(pools))
+	for i, p := range pools {
+		quoted[i] = fmt.Sprintf("%q", p)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "pools = [%s]\n\n[news]\naggregators = [", strings.Join(quoted, ", "))
+	for i, a := range aggregators {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", a)
+	}
+	b.WriteString("]\n")
+	for _, u := range feedURLs {
+		fmt.Fprintf(&b, "\n[[following.feeds]]\nurl = %q\n", u)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// refreshLogOrEmpty reads refresh.log like readRefreshLog, but a missing
+// file is not a test failure: unlike the existing failure-path tests, the
+// two tests below expect a genuinely quiet run (a skipped pool logs
+// nothing, and the other pool succeeds without a hitch), so refresh.log may
+// never have been created at all when the implementation is correct.
+func refreshLogOrEmpty(t *testing.T) string {
+	t.Helper()
+	path, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("read refresh log: %v", err)
+	}
+	return string(data)
+}
+
+// TestRunRefresh_NewsEnabledButEmptyIsSkippedNotFailed pins the
+// enabled-vs-active distinction at runRefresh's news call site. It is not
+// covered by any earlier test: every prior writeRefreshConfig call gives
+// news a non-empty aggregator list whenever news is enabled, so "enabled"
+// and "active" never diverge for news anywhere else in this file. A
+// regression that swaps cfg.NewsActive() for cfg.PoolEnabled("news") would
+// still see news as enabled here (it IS enabled, just with nothing
+// configured) and would call refreshNews anyway, which returns "all
+// aggregators returned no stories" for a genuinely empty aggregator list —
+// producing a spurious "news: ..." log line for a pool that was never
+// supposed to run at all.
+func TestRunRefresh_NewsEnabledButEmptyIsSkippedNotFailed(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, false)
+	writeRefreshConfigExplicitPools(t,
+		[]string{"news", "following"},
+		[]string{feeds.URL + "/feed.xml"},
+		nil, // news enabled, zero aggregators: enabled but not active
+	)
+
+	if err := runRefresh(); err != nil {
+		t.Fatalf("runRefresh() = %v, want nil: following is active and succeeds, news is enabled but has nothing to do", err)
+	}
+
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followingPath); err != nil {
+		t.Errorf("following.json should have been written: %v", err)
+	}
+	if log := refreshLogOrEmpty(t); strings.Contains(log, "news") {
+		t.Errorf("refresh.log has a news-pool line for a pool with nothing configured (enabled != active):\n%s", log)
+	}
+}
+
+// TestRunRefresh_FollowingEnabledButEmptyDoesNotMaskNewsFailure pins the
+// enabled-vs-active distinction at runRefresh's FOLLOWING call site.
+//
+// The literal mirror of the news test above — following empty, news
+// enabled and SUCCEEDING — cannot discriminate the
+// cfg.FollowingActive()→cfg.PoolEnabled("following") regression:
+// refreshFollowing carries its own defense-in-depth check
+// (cfg.FollowingActive(), its very first line, there to protect
+// feedstate.Update's garbage-collection — see its doc comment) that no-ops
+// the whole fan-out regardless of which gate runRefresh used to call it. An
+// empty-but-enabled following pool stays silent either way as long as
+// nothing else is failing, so that shape was tried, observed to still PASS
+// under the mutation below, and dropped rather than committed as a false
+// regression pin.
+//
+// The distinction only becomes externally visible when it changes the
+// all-active-pools-failed verdict: pair the enabled-but-empty following
+// pool with a FAILING (not succeeding) news pool. Correctly, exactly one
+// pool is ACTIVE (news) and it failed, so runRefresh must return an error.
+// Under the regression, following is wrongly counted into "attempted"
+// (PoolEnabled("following") is true) but refreshFollowing's internal guard
+// still keeps it out of "failed" — diluting attempted=2/failed=1 into a
+// false success (nil, exit 0) for a user whose only working pool just
+// broke.
+func TestRunRefresh_FollowingEnabledButEmptyDoesNotMaskNewsFailure(t *testing.T) {
+	isolateXDG(t)
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+	writeRefreshConfigExplicitPools(t,
+		[]string{"news", "following"},
+		nil, // following enabled, zero feeds: enabled but not active
+		[]string{"hackernews"},
+	)
+
+	if err := runRefresh(); err == nil {
+		t.Fatal("runRefresh() = nil with the only ACTIVE pool (news) failing, want an error: an enabled-but-empty following pool must not dilute the all-active-pools-failed verdict")
+	}
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(newsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("feed.json exists after a failed news fetch (stat err = %v); a failed pool must not write", err)
+	}
+	if log := refreshLogOrEmpty(t); strings.Contains(log, "following") {
+		t.Errorf("refresh.log has a following-pool line for a pool with nothing configured (enabled != active):\n%s", log)
+	}
+}
