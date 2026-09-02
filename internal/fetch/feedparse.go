@@ -83,11 +83,16 @@ type atomText struct {
 // decision (14/14 surveyed feeds were UTF-8; revisit on a real report,
 // same posture as RDF). Items missing a title or URL are silently
 // dropped; an unparseable date keeps the item with HasDate=false so the
-// caller can substitute fetch time. Malformed XML fails the whole feed —
-// no partial salvage, and that includes anything outside XML's legal
-// prolog before the root element (see [readPrologue]) or its Misc*
-// epilogue after it (see [checkEpilogue]). The root element name is
-// examined once to dispatch to the correct format parser.
+// caller can substitute fetch time. Malformed XML fails the whole feed:
+// nothing parsed before the failure is salvaged. That is a promise about
+// failure GRANULARITY, not a claim to validate XML. What is enforced is
+// encoding/xml's strict well-formedness plus a gate at each end of the
+// document rejecting content with no business outside the root — a proxy
+// or CDN error page prepended to the body (see [readPrologue]), a second
+// concatenated document or a trailing directive (see [checkEpilogue]).
+// Neither gate enforces XML's prolog grammar; [readPrologue] records
+// what that deliberately lets through. The root element name is examined
+// once to dispatch to the correct format parser.
 //
 // One rule governs every text field on both paths: decode it as a SLICE
 // and take the first non-empty trimmed value. encoding/xml matches child
@@ -179,18 +184,30 @@ func parseFeed(data []byte) ([]feedItem, error) {
 }
 
 // readPrologue advances the decoder to the root StartElement and returns
-// it, rejecting anything XML does not allow before a root. Skipping to the
-// first StartElement unconditionally would swallow a proxy or CDN error
+// it, rejecting content that has no business before a root. Skipping to
+// the first StartElement unconditionally would swallow a proxy or CDN error
 // page prepended to the feed body, contradicting parseFeed's "malformed
 // XML fails the whole feed" contract at the head of the document the same
 // way an unchecked epilogue does at the tail (see [checkEpilogue]).
 //
-// The prolog is `XMLDecl? Misc* (doctypedecl Misc*)?`: an XML declaration,
-// comments, processing instructions, whitespace and — unlike the epilogue
-// — a DOCTYPE directive. Real feeds ship all of them, so only non-
-// whitespace text and a stray end element are rejected here. Ordering
-// within the prolog is left to the decoder; the failure this guards
-// against is content that has no business in a prolog at all.
+// The gate is on token KIND, not on XML's prolog grammar. An XML
+// declaration, comments, processing instructions, whitespace and —
+// unlike the epilogue — a DOCTYPE directive all pass, because real feeds
+// ship all of them; non-whitespace text, a stray end element and a
+// reserved processing-instruction target are rejected. Order and
+// cardinality go unchecked, so three documents XML forbids parse anyway:
+// a declaration after a comment, a second DOCTYPE, and a bare <!ENTITY>
+// outside a DTD.
+//
+// Accepting those three was ruled deliberate on 2026-09-01. None of them
+// changes a single extracted item, and the rules needed to catch them
+// would also reject a stray newline before the declaration — the classic
+// WordPress/PHP blank-line defect — since the grammar puts the
+// declaration at byte 0. A wrongly rejected feed contributes nothing to
+// its pool and surfaces a warning the reader cannot act on, not being
+// the publisher, which is the worse failure. [checkEpilogue] can afford
+// to enforce placement as well as kind because what XML allows after the
+// root is a genuinely tiny closed set.
 func readPrologue(dec *xml.Decoder) (xml.StartElement, error) {
 	for {
 		t, err := dec.Token()
@@ -204,7 +221,22 @@ func readPrologue(dec *xml.Decoder) (xml.StartElement, error) {
 			if strings.TrimSpace(string(tok)) != "" {
 				return xml.StartElement{}, errors.New("parse feed: unexpected text before root element")
 			}
-		case xml.Comment, xml.ProcInst, xml.Directive:
+		case xml.ProcInst:
+			// XML reserves the three-letter target in any case. Exactly
+			// "xml" is the declaration and belongs here; any other casing
+			// is a name no document may use — and encoding/xml applies its
+			// encoding check to the lowercase spelling ALONE, so accepting
+			// <?XML encoding="ISO-8859-1"?> would walk a non-UTF-8
+			// declaration straight past the UTF-8-only rule.
+			//
+			// Exact three letters, never a prefix: XML's prose reserves
+			// targets merely beginning with "xml", but enforcing that here
+			// would reject <?xml-stylesheet?> and <?xml-model?>, which
+			// browser-viewable feeds ship widely.
+			if tok.Target != "xml" && strings.EqualFold(tok.Target, "xml") {
+				return xml.StartElement{}, fmt.Errorf("parse feed: reserved processing instruction target %q before root element", tok.Target)
+			}
+		case xml.Comment, xml.Directive:
 			// legal prolog
 		default:
 			// An end element here is a syntax error the strict decoder
@@ -221,14 +253,17 @@ func readPrologue(dec *xml.Decoder) (xml.StartElement, error) {
 // whole second document — parses clean, contradicting parseFeed's
 // "malformed XML fails the whole feed" contract.
 //
-// Only the Misc* epilogue is legal: whitespace, comments, processing
-// instructions. Rejecting the first non-EOF token outright would fail
-// every feed that ends with a newline, which is most of them.
+// Only whitespace, comments and processing instructions are legal after
+// the root. Rejecting the first non-EOF token outright would fail every
+// feed that ends with a newline, which is most of them.
 //
-// A DOCTYPE directive is prolog-only Misc and is rejected here even
-// though [readPrologue] accepts one, and so is the XML declaration, which
+// That set is small enough to enforce PLACEMENT as well as kind, which
+// [readPrologue] does not do. A DOCTYPE directive is rejected here even
+// though the prologue accepts one, and so is the XML declaration, which
 // Go surfaces as an ordinary ProcInst with target "xml" — both after a
-// closed root mean a second document was concatenated onto this one.
+// closed root mean a second document was concatenated onto this one. Any
+// other casing of that target is reserved rather than a declaration, and
+// is equally rejected; longer names like xml-stylesheet stay legal.
 func checkEpilogue(dec *xml.Decoder) error {
 	for {
 		t, err := dec.Token()
@@ -244,8 +279,8 @@ func checkEpilogue(dec *xml.Decoder) error {
 				return errors.New("parse feed: unexpected text after root element")
 			}
 		case xml.ProcInst:
-			if tok.Target == "xml" {
-				return errors.New("parse feed: xml declaration after root element")
+			if strings.EqualFold(tok.Target, "xml") {
+				return fmt.Errorf("parse feed: reserved processing instruction target %q after root element", tok.Target)
 			}
 		case xml.Comment:
 			// legal epilogue
