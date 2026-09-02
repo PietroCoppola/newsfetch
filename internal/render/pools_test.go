@@ -416,6 +416,65 @@ func TestJSONPools_SingleStoryIsAOneElementArray_R3ContractBreak(t *testing.T) {
 	}
 }
 
+// TestJSONPools_EmptyPoolNameStillEmitsTheKey pins that the pool key is
+// present on EVERY element, even when the pool name is the empty string.
+// This is a substring check on the raw wire text, not an unmarshal-based
+// one: unmarshalling into a Go string field can't tell "key absent" from
+// "key present with value \"\"" (the zero value is the same either way),
+// so only a literal `"pool":""` check can catch omitempty silently
+// dropping the key. omitempty would make the "pool on every object"
+// promise conditional on the name being non-empty — the same
+// shape-varies-with-circumstances failure this task exists to eliminate,
+// just relocated from story-count to name-emptiness.
+func TestJSONPools_EmptyPoolNameStillEmitsTheKey(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	pools := []render.Pool{{
+		Name:  "",
+		Label: "",
+		Stories: []fetch.Story{{
+			Title:     "unnamed pool story",
+			URL:       "https://example.com/unnamed",
+			Source:    "hackernews",
+			CreatedAt: now.Add(-time.Hour),
+			Tags:      []string{},
+		}},
+	}}
+	out := render.JSONPools(pools, now)
+	if !strings.Contains(out, `"pool":""`) {
+		t.Errorf("pool key must be present (as \"\") even for an empty pool name: %q", out)
+	}
+}
+
+// TestJSONPools_FractionalAgeHasNoDecimalPoint pins age_seconds' wire type
+// as int64 using a GENUINELY fractional duration (90.5s). This is
+// deliberate: Go's json encoder prints a whole-number float64 with no
+// decimal point too (json.Marshal(90.0) is "90", not "90.0"), so a
+// whole-second fixture — like every other JSONPools test uses — cannot
+// tell int64 from float64 apart; it would pass unchanged even if
+// AgeSeconds regressed to float64. Only a fractional-second age makes the
+// "no decimal point" check discriminate.
+func TestJSONPools_FractionalAgeHasNoDecimalPoint(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	pools := []render.Pool{{
+		Name:  "news",
+		Label: "News",
+		Stories: []fetch.Story{{
+			Title:     "fractional age",
+			URL:       "https://example.com/fractional",
+			Source:    "hackernews",
+			CreatedAt: now.Add(-90*time.Second - 500*time.Millisecond), // 90.5s ago
+			Tags:      []string{},
+		}},
+	}}
+	out := render.JSONPools(pools, now)
+	if strings.Contains(out, `"age_seconds":90.`) {
+		t.Errorf("age_seconds must not carry a decimal point (int64 truncates 90.5s to 90): %q", out)
+	}
+	if !strings.Contains(out, `"age_seconds":90`) {
+		t.Errorf("expected truncated age_seconds:90 in %q", out)
+	}
+}
+
 func TestMinimalPools_OneBlankLineBetweenPoolsOnly(t *testing.T) {
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	pools := jsonPoolFixture(now)

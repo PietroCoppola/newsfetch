@@ -78,15 +78,19 @@ func Pools(pools []Pool, now time.Time, width int, opts MultiOptions) (string, e
 // means the field set and its tags cannot drift apart between entry
 // points — the tags ARE the documented contract.
 //
-// Pool is omitempty so the struct stays usable for any future
-// pool-unaware caller; every production render stamps it.
+// Pool carries no omitempty: the binding contract (R-3) is a pool field
+// on EVERY object, unconditionally. omitempty would make that promise
+// conditional on the name being non-empty — an empty name would drop the
+// key entirely rather than emit "pool":"" — which is the same
+// shape-varies-with-circumstances failure R-3 exists to eliminate, just
+// relocated from story-count to name-emptiness.
 type payload struct {
 	Title      string   `json:"title"`
 	URL        string   `json:"url"`
 	Source     string   `json:"source"`
 	AgeSeconds int64    `json:"age_seconds"`
 	Tags       []string `json:"tags"`
-	Pool       string   `json:"pool,omitempty"`
+	Pool       string   `json:"pool"`
 }
 
 // newPayload converts one story into its wire form, applying the two
