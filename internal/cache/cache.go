@@ -1,4 +1,9 @@
-// Package cache reads and writes the newsfetch story cache (feed.json).
+// Package cache reads and writes newsfetch's story caches.
+//
+// Each render pool owns a file in one directory: the news pool keeps
+// feed.json — unchanged from before pools existed, because the statusline
+// read path, --uninstall, and every cache already on disk address it by
+// that name — and the following pool caches to following.json beside it.
 //
 // The cache is on the hot render path: every invocation reads it, most
 // invocations only read it. Writes happen off the hot path from the
@@ -12,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
@@ -35,18 +41,61 @@ type File struct {
 // as any other cache-corruption error.
 var ErrSchemaVersion = errors.New("cache: unsupported schema version")
 
-// Path returns the absolute path to feed.json. It honours XDG_CACHE_HOME
-// first, then falls back to $HOME/.cache/newsfetch/feed.json. It returns an
-// error if neither is resolvable.
-func Path() (string, error) {
+// Dir returns the absolute path to newsfetch's cache directory, honouring
+// XDG_CACHE_HOME first and falling back to $HOME/.cache/newsfetch. Pool
+// files live side by side in it, and callers that need the directory
+// itself (a refresh writing two pools, an uninstall listing what it will
+// remove) should ask for it here rather than taking filepath.Dir of a
+// pool path, which would silently depend on that pool existing.
+func Dir() (string, error) {
 	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" && filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "newsfetch", "feed.json"), nil
+		return filepath.Join(xdg, "newsfetch"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve cache path: %w", err)
+		return "", fmt.Errorf("resolve cache dir: %w", err)
 	}
-	return filepath.Join(home, ".cache", "newsfetch", "feed.json"), nil
+	return filepath.Join(home, ".cache", "newsfetch"), nil
+}
+
+// poolFile maps a pool name to its cache file's basename. The mapping is
+// deliberately a closed switch rather than a lookup that falls through to
+// a derived name: an unrecognised pool has to be an error, because a
+// guessed filename would hand the caller a permanently empty cache and
+// nothing downstream would ever notice.
+//
+// news keeps feed.json for compatibility, so the mapping is not
+// mechanical and cannot be replaced by pool+".json".
+func poolFile(pool string) (string, bool) {
+	switch pool {
+	case "news":
+		return "feed.json", true
+	case "following":
+		return "following.json", true
+	}
+	return "", false
+}
+
+// PoolPath returns the absolute path to pool's cache file. It returns an
+// error for any pool with no cache file of its own.
+func PoolPath(pool string) (string, error) {
+	name, ok := poolFile(pool)
+	if !ok {
+		return "", fmt.Errorf("cache path: unknown pool %q", pool)
+	}
+	dir, err := Dir()
+	if err != nil {
+		return "", fmt.Errorf("cache path for pool %q: %w", pool, err)
+	}
+	return filepath.Join(dir, name), nil
+}
+
+// Path returns the absolute path to the news pool's cache, feed.json. It
+// is exactly PoolPath("news") and exists because callers reach for the
+// news cache by function value (see cmd/newsfetch's refresh wiring) and
+// because renaming that file would strand every cache already on disk.
+func Path() (string, error) {
+	return PoolPath("news")
 }
 
 // Read parses the cache at path. It returns an error if the file is missing,
@@ -68,9 +117,10 @@ func Read(path string) (*File, error) {
 }
 
 // Write persists f to path using a temp file + rename so a killed process
-// never leaves a half-written cache. The caller is responsible for setting
-// f.Version to [SchemaVersion] and f.CachedByVersion to the current binary
-// version.
+// never leaves a half-written cache. The temp file is named after the
+// target (see [tempPattern]) so debris from a crashed write names the pool
+// that actually crashed. The caller is responsible for setting f.Version
+// to [SchemaVersion] and f.CachedByVersion to the current binary version.
 func Write(path string, f *File) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -80,7 +130,7 @@ func Write(path string, f *File) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, "feed-*.json.tmp")
+	tmp, err := os.CreateTemp(dir, tempPattern(path))
 	if err != nil {
 		return fmt.Errorf("create temp cache: %w", err)
 	}
@@ -99,6 +149,21 @@ func Write(path string, f *File) error {
 		return fmt.Errorf("rename temp cache: %w", err)
 	}
 	return nil
+}
+
+// tempPattern builds the os.CreateTemp pattern for a write to path: the
+// target's own basename, minus .json, plus the random-suffix marker. The
+// pattern was hardcoded to feed-*.json.tmp when feed.json was the only
+// cache; now that every pool has a file in the same directory, debris
+// from an interrupted write has to name the pool it came from, or a
+// reader of that directory (or a future cleanup that pattern-matches)
+// blames the wrong pool.
+//
+// It stays "*.json.tmp" rather than "*.tmp": the content is JSON, and the
+// suffix is what distinguishes a torn write from a live cache to anything
+// globbing the directory.
+func tempPattern(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".json") + "-*.json.tmp"
 }
 
 // Age returns how long ago FetchedAt was relative to now.

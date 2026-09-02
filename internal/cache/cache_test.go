@@ -245,3 +245,183 @@ func TestWriteRead_RoundTripsSummaryAndFeed(t *testing.T) {
 		t.Errorf("round-trip lost fields: got %+v", got.Stories[0])
 	}
 }
+
+func TestDir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "/tmp/xdg-cache")
+	t.Setenv("HOME", "/home/user")
+	got, err := cache.Dir()
+	if err != nil {
+		t.Fatalf("Dir: %v", err)
+	}
+	if want := "/tmp/xdg-cache/newsfetch"; got != want {
+		t.Errorf("Dir = %q, want %q", got, want)
+	}
+}
+
+// TestPoolPath walks both pools through both resolution paths, because the
+// XDG-vs-$HOME fork is the part a per-pool refactor is most likely to
+// duplicate and then get wrong for exactly one pool.
+func TestPoolPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		xdg      string // "" means set-but-empty; see unsetXDG for genuinely unset
+		unsetXDG bool
+		home     string
+		pool     string
+		want     string
+		wantErr  bool
+	}{
+		{
+			name: "news under XDG_CACHE_HOME",
+			xdg:  "/tmp/xdg-cache",
+			home: "/home/user",
+			pool: "news",
+			want: "/tmp/xdg-cache/newsfetch/feed.json",
+		},
+		{
+			name: "following under XDG_CACHE_HOME",
+			xdg:  "/tmp/xdg-cache",
+			home: "/home/user",
+			pool: "following",
+			want: "/tmp/xdg-cache/newsfetch/following.json",
+		},
+		{
+			name:     "news falls back to $HOME/.cache",
+			unsetXDG: true,
+			home:     "/home/user",
+			pool:     "news",
+			want:     "/home/user/.cache/newsfetch/feed.json",
+		},
+		{
+			name:     "following falls back to $HOME/.cache",
+			unsetXDG: true,
+			home:     "/home/user",
+			pool:     "following",
+			want:     "/home/user/.cache/newsfetch/following.json",
+		},
+		{
+			name: "empty XDG falls back for both pools",
+			xdg:  "",
+			home: "/home/user",
+			pool: "following",
+			want: "/home/user/.cache/newsfetch/following.json",
+		},
+		{
+			name: "relative XDG is ignored",
+			xdg:  "relative/path",
+			home: "/home/user",
+			pool: "following",
+			want: "/home/user/.cache/newsfetch/following.json",
+		},
+		{
+			// A pool name with no cache file must be an error, never a
+			// guessed filename: a typo that resolved to repos.json would
+			// silently give the caller an empty cache forever.
+			name:    "unknown pool is an error, not a guessed filename",
+			xdg:     "/tmp/xdg-cache",
+			home:    "/home/user",
+			pool:    "repos",
+			wantErr: true,
+		},
+		{
+			name:    "empty pool name is an error",
+			xdg:     "/tmp/xdg-cache",
+			home:    "/home/user",
+			pool:    "",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unsetXDG {
+				t.Setenv("XDG_CACHE_HOME", "x")
+				os.Unsetenv("XDG_CACHE_HOME")
+			} else {
+				t.Setenv("XDG_CACHE_HOME", tc.xdg)
+			}
+			t.Setenv("HOME", tc.home)
+
+			got, err := cache.PoolPath(tc.pool)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("PoolPath(%q): want error, got nil (got=%q)", tc.pool, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PoolPath(%q): %v", tc.pool, err)
+			}
+			if got != tc.want {
+				t.Errorf("PoolPath(%q) = %q, want %q", tc.pool, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPath_IsStillTheNewsPoolFeedJSON is a regression pin, not a
+// restatement of TestPath. feed.json is addressed by name from the
+// statusline read path and from --uninstall, and every user already has
+// one on disk; there is no migration. Path must therefore keep returning
+// exactly PoolPath("news"), byte for byte.
+func TestPath_IsStillTheNewsPoolFeedJSON(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "/tmp/xdg-cache")
+	t.Setenv("HOME", "/home/user")
+	got, err := cache.Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if want := "/tmp/xdg-cache/newsfetch/feed.json"; got != want {
+		t.Errorf("Path = %q, want %q (renaming the news cache would strand every existing cache file)", got, want)
+	}
+	pooled, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("PoolPath(news): %v", err)
+	}
+	if got != pooled {
+		t.Errorf("Path = %q but PoolPath(\"news\") = %q; they must be the same path", got, pooled)
+	}
+}
+
+// TestWriteRead_PoolsAreIndependentFiles proves the two pools address
+// different files in one directory: writing the following pool must not
+// disturb the news pool's cache.
+func TestWriteRead_PoolsAreIndependentFiles(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	news := &cache.File{Version: cache.SchemaVersion, CachedByVersion: "dev", FetchedAt: fetched,
+		Stories: []fetch.Story{{ID: "hn-1", Title: "News story", URL: "https://example.com/n", Source: "hackernews"}}}
+	following := &cache.File{Version: cache.SchemaVersion, CachedByVersion: "dev", FetchedAt: fetched,
+		Stories: []fetch.Story{{ID: "rss-1", Title: "Feed story", URL: "https://example.com/f", Source: "following", Feed: "https://example.com/feed.xml"}}}
+
+	if err := cache.Write(newsPath, news); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Write(followingPath, following); err != nil {
+		t.Fatal(err)
+	}
+	gotNews, err := cache.Read(newsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotNews.Stories) != 1 || gotNews.Stories[0].Title != "News story" {
+		t.Errorf("news cache = %+v, want the news story untouched by the following write", gotNews.Stories)
+	}
+	gotFollowing, err := cache.Read(followingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotFollowing.Stories) != 1 || gotFollowing.Stories[0].Title != "Feed story" {
+		t.Errorf("following cache = %+v, want the feed story", gotFollowing.Stories)
+	}
+}
