@@ -27,7 +27,6 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
-	"github.com/PietroCoppola/newsfetch/internal/render"
 )
 
 const (
@@ -236,14 +235,12 @@ func runDefault(out, errOut io.Writer, args []string, rng *rand.Rand) error {
 	if err != nil {
 		return err
 	}
-	if len(rendered) == 0 {
-		// Every active pool came up empty — cold caches with a failed
-		// cold fetch, or nothing left after the two-pass selection. Same
-		// fallback the single-pool path printed, with a pools-aware
-		// message (R-21).
-		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg)))
-		return nil
-	}
+	// Every active pool coming up empty — cold caches with a failed cold
+	// fetch, or nothing left after the two-pass selection — is not
+	// short-circuited here. writePools owns it, because what "nothing to
+	// show" looks like depends on the style: a fallback sentence for
+	// boxed and minimal, an empty array for json (R-3). recordHistory
+	// no-ops on an empty render, so it needs no guard of its own.
 	if err := writePools(out, pools, cfg, now); err != nil {
 		return err
 	}

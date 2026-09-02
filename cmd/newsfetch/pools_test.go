@@ -824,3 +824,50 @@ func TestWritePools_DispatchesByStyle(t *testing.T) {
 		}
 	})
 }
+
+// TestWritePools_NothingToShowIsStyleAware pins the fix for a render-path
+// bug: the all-empty render used to bypass style dispatch entirely and
+// print an English sentence, so `newsfetch --style=json | jq` failed on a
+// healthy install the moment a pool read as present-but-empty. R-3's
+// uniform-array contract has no exception for "nothing to show" — an
+// empty array IS the answer, and it parses.
+func TestWritePools_NothingToShowIsStyleAware(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	cfg := poolTestCfg()
+	// Two pools that read fine and hold nothing — the ordinary state
+	// after a following pool legitimately refreshes to zero stories.
+	empty := []render.Pool{
+		{Name: "following", Label: "Following"},
+		{Name: "news", Label: "News"},
+	}
+
+	t.Run("json emits a parseable empty array", func(t *testing.T) {
+		cfgJSON := cfg
+		cfgJSON.Style = "json"
+		var buf bytes.Buffer
+		if err := writePools(&buf, empty, cfgJSON, now); err != nil {
+			t.Fatalf("writePools: %v", err)
+		}
+		var elements []map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &elements); err != nil {
+			t.Fatalf("json style must stay an array with nothing to show (R-3): %v; got %q", err, buf.String())
+		}
+		if len(elements) != 0 {
+			t.Errorf("got %d elements, want 0: %q", len(elements), buf.String())
+		}
+	})
+
+	for _, style := range []string{"boxed", "minimal"} {
+		t.Run(style+" keeps the fallback message", func(t *testing.T) {
+			cfgStyle := cfg
+			cfgStyle.Style = style
+			var buf bytes.Buffer
+			if err := writePools(&buf, empty, cfgStyle, now); err != nil {
+				t.Fatalf("writePools: %v", err)
+			}
+			if want := render.Fallback(fallbackMessage(cfgStyle)); buf.String() != want {
+				t.Errorf("%s style with nothing to show\n got: %q\nwant: %q", style, buf.String(), want)
+			}
+		})
+	}
+}

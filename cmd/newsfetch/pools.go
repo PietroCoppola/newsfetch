@@ -308,7 +308,7 @@ func fetchNewsCold(cfg config.Config, path string, errOut io.Writer) ([]fetch.St
 	defer cancel()
 	stories, errs, err := multiFetch(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("news pool cold-start fetch: %w", err)
 	}
 	for name, e := range errs {
 		_ = refreshlog.Append(fmt.Sprintf("%s: %s", name, e))
@@ -333,7 +333,20 @@ func fetchNewsCold(cfg config.Config, path string, errOut io.Writer) ([]fetch.St
 //     so the stacked boxes align. Two or more rendering pools get header
 //     labels; one pool gets none, which keeps the common case
 //     byte-identical to the pre-pool render.
+//
+// The nothing-to-show render is dispatched here rather than short-circuited
+// by the caller, because it is style-dependent too. boxed and minimal print
+// the fallback sentence, unchanged. json does NOT: R-3's uniform top-level
+// array has no exception for an empty render, and an empty array is both
+// the honest answer and a parseable one. Printing prose down a --style=json
+// pipe broke `newsfetch --style=json | jq` on a healthy install the moment
+// a pool read as present-but-empty, which R-36 made an ordinary state
+// rather than a network failure.
 func writePools(out io.Writer, pools []render.Pool, cfg config.Config, now time.Time) error {
+	if cfg.Style != "json" && !anyStories(pools) {
+		fmt.Fprint(out, render.Fallback(fallbackMessage(cfg)))
+		return nil
+	}
 	switch cfg.Style {
 	case "minimal":
 		fmt.Fprint(out, render.MinimalPools(pools, now))
@@ -350,4 +363,18 @@ func writePools(out io.Writer, pools []render.Pool, cfg config.Config, now time.
 		fmt.Fprint(out, rendered)
 	}
 	return nil
+}
+
+// anyStories reports whether any pool has something to render. It reads
+// the story count rather than the pool count on purpose: a pool that read
+// cleanly and held nothing is present and fresh (R-36) but still renders
+// nothing, so pools carrying only empty pools is the ordinary
+// nothing-to-show shape, not an error.
+func anyStories(pools []render.Pool) bool {
+	for _, p := range pools {
+		if len(p.Stories) > 0 {
+			return true
+		}
+	}
+	return false
 }

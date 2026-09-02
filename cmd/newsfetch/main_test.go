@@ -965,3 +965,51 @@ url = "https://a.example/feed.xml"
 		}
 	}
 }
+
+// TestRunDefault_StyleJSON_NothingToShowIsAnEmptyArray is the end-to-end
+// half of the same fix. The reachable configuration needs no network and
+// no failure: one enabled pool whose cache read cleanly and held zero
+// stories. Before the fix runDefault printed the offline sentence with no
+// style dispatch at all, so a --style=json consumer piping into jq broke
+// on a perfectly healthy install.
+func TestRunDefault_StyleJSON_NothingToShowIsAnEmptyArray(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	original := spawnRefresh
+	spawnRefresh = func() {}
+	t.Cleanup(func() { spawnRefresh = original })
+
+	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	toml := "pools = [\"following\"]\n\n[[following.feeds]]\nurl = \"https://a.example/feed.xml\"\n"
+	if err := os.WriteFile(cfgPath, []byte(toml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	now := time.Now().UTC()
+	path, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatalf("cache.PoolPath: %v", err)
+	}
+	if err := cache.Write(path, &cache.File{
+		Version:         cache.SchemaVersion,
+		CachedByVersion: defaults.Version,
+		FetchedAt:       now.Add(-time.Minute),
+		Stories:         []fetch.Story{},
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runDefault(&stdout, &stderr, []string{"--style=json"}, rand.New(rand.NewSource(1))); err != nil {
+		t.Fatalf("runDefault: %v\nstderr: %s", err, stderr.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("--style=json emitted non-JSON with nothing to show: %v\nstdout: %q", err, stdout.String())
+	}
+	if len(payload) != 0 {
+		t.Errorf("got %d elements, want 0: %s", len(payload), stdout.String())
+	}
+}
