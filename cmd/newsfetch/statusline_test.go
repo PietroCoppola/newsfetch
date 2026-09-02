@@ -761,3 +761,95 @@ func TestStatusline_EmptyNewsAggregatorsIsNeverRead(t *testing.T) {
 		t.Errorf("spawnRefresh called %d times, want 0: the following cache is fresh, and a stale cache belonging to an inactive pool is never read", *spawned)
 	}
 }
+
+// TestStatusline_LastResortHonoursReversedPoolOrder is the discriminating
+// half of R-31's tie-break, and the reason it exists is that every other
+// fixture in this file leaves pool_order unset — where it defaults to the
+// compile-time order, which is the enabled-pools order too. Those two lists
+// being equal makes the tie-break untestable: substituting the enabled set
+// for the configured order in the last-resort loop passes every one of them.
+//
+// This config reverses them on purpose. pools stays [following news], so
+// PRECEDENCE is unchanged and the followed story still takes the prime slot
+// on the first render; pool_order is [news following], so once every story
+// in both pools has been rendered the last-resort pass must re-show the NEWS
+// story. Precedence is not pool_order, and pool_order is not the enabled
+// list — this is the only test that can tell all three apart.
+//
+// The second half is the cross-surface pin the last-resort rule needs most,
+// because that rule is implemented twice: once in assemblePools for the box,
+// once in pickStatusline for the status row. Under one config and one
+// seen-state they must name the SAME pool. If they ever drift, a user who
+// sets pool_order = ["news", "following"] gets the box repeating one pool
+// and the status row repeating the other, in the same terminal, in the same
+// state — the exact divergence this task exists to prevent, and one that
+// would otherwise ship green.
+func TestStatusline_LastResortHonoursReversedPoolOrder(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	// pools and pool_order deliberately disagree: orderPools keeps the
+	// user's listed names first, so PoolOrder normalises to [news following]
+	// while Pools stays [following news].
+	writeUserConfig(t, configDir, "pools = [\"following\", \"news\"]\npool_order = [\"news\", \"following\"]\n\n[[following.feeds]]\nurl = \""+testFeedURL+"\"\n")
+	countSpawnRefresh(t)
+	now := time.Now().UTC()
+	seedFollowingPool(t, now.Add(-1*time.Minute), "The case for slow blogging")
+	seedNewsPool(t, 1, now.Add(-1*time.Minute))
+
+	// Precedence ignores pool_order: following still goes first while it has
+	// something unseen to offer. Two renders drive both pools fully seen.
+	first := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(first, "The case for slow blogging") {
+		t.Fatalf("first statusline = %q, want the followed story: precedence is not pool_order", first)
+	}
+	second := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(second, "Story A") {
+		t.Fatalf("second statusline = %q, want the news story", second)
+	}
+
+	// Everything is seen, so the last-resort pass runs and pool_order — not
+	// the enabled list, and not precedence — decides which pool repeats.
+	third := runStatuslineArgs(t, 1, "--style=statusline", "--pin=")
+	if !strings.Contains(third, "Story A") {
+		t.Errorf("third statusline = %q, want the news story re-shown: pool_order puts news first", third)
+	}
+	if strings.Contains(third, "The case for slow blogging") {
+		t.Errorf("third statusline = %q, want no followed story: it is first in pools but last in pool_order", third)
+	}
+
+	// Same config, same seen-state, the other surface. parseAndLoad is the
+	// production load-and-validate path, so cfg here is exactly what the
+	// statusline renders above were given.
+	cfg, _, _, err := parseAndLoad(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("parseAndLoad: %v", err)
+	}
+	if got, want := strings.Join(cfg.PoolOrder, ","), "news,following"; got != want {
+		t.Fatalf("cfg.PoolOrder = %q, want %q: the fixture must actually reverse the order for this test to discriminate", got, want)
+	}
+	if got, want := strings.Join(cfg.Pools, ","), "following,news"; got != want {
+		t.Fatalf("cfg.Pools = %q, want %q: pools and pool_order must disagree for this test to discriminate", got, want)
+	}
+	seen := loadSeen(cfg, now, io.Discard)
+	pools, rendered, err := assemblePools(cfg, seen, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	var boxPool string
+	for _, p := range pools {
+		if len(p.Stories) > 0 {
+			if boxPool != "" {
+				t.Fatalf("assemblePools repeated %d pools, want exactly 1: the last resort spends the bypass on one pool only", len(rendered))
+			}
+			boxPool = p.Name
+		}
+	}
+	if boxPool != "news" {
+		t.Errorf("assemblePools re-showed pool %q, want \"news\"", boxPool)
+	}
+	// The two surfaces agreed on "news" only if BOTH assertions above held;
+	// this restates the conclusion as one claim so a failure reads as the
+	// cross-surface divergence it is rather than as two unrelated bugs.
+	if boxPool == "news" && !strings.Contains(third, "Story A") {
+		t.Error("the boxed render repeats the news pool but the status row does not: two surfaces, one user, one state")
+	}
+}
