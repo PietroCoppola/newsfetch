@@ -29,8 +29,8 @@ func TestSettingsFlow_OverwritesConfig(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("topics = [\"old\"]\nstyle = \"boxed\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	current := Answers{Topics: []string{"old"}, Style: "boxed", Sources: []string{"hackernews"}}
-	answers := Answers{Topics: []string{"rust"}, Style: "minimal", Sources: []string{"hackernews", "lobsters"}}
+	current := Answers{Topics: []string{"old"}, Style: "boxed", NewsAggregators: []string{"hackernews"}}
+	answers := Answers{Topics: []string{"rust"}, Style: "minimal", NewsAggregators: []string{"hackernews", "lobsters"}}
 
 	if err := SettingsFlow(fixedSettingsDeps(t, configPath, current, answers)); err != nil {
 		t.Fatalf("SettingsFlow: %v", err)
@@ -44,8 +44,8 @@ func TestSettingsFlow_OverwritesConfig(t *testing.T) {
 	if !strings.Contains(gotStr, `style = "minimal"`) {
 		t.Errorf("style not updated:\n%s", gotStr)
 	}
-	if !strings.Contains(gotStr, `sources = ["hackernews", "lobsters"]`) {
-		t.Errorf("sources not updated:\n%s", gotStr)
+	if !strings.Contains(gotStr, "[news]") || !strings.Contains(gotStr, `aggregators = ["hackernews", "lobsters"]`) {
+		t.Errorf("news aggregators not updated:\n%s", gotStr)
 	}
 	if strings.Contains(gotStr, `"old"`) {
 		t.Errorf("old content survived:\n%s", gotStr)
@@ -107,14 +107,14 @@ func TestSettingsFlow_PassesCurrentToAnswersFn(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("topics = []\nstyle = \"boxed\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	current := Answers{Topics: []string{"go"}, Style: "json", Sources: []string{"lobsters"}}
+	current := Answers{Topics: []string{"go"}, Style: "json", NewsAggregators: []string{"lobsters"}}
 	var seen Answers
 	deps := SettingsDeps{
 		ConfigPath: func() (string, error) { return configPath, nil },
 		Current:    func(string) (Answers, error) { return current, nil },
 		Answers: func(c Answers) (Answers, error) {
 			seen = c
-			return Answers{Topics: nil, Style: "boxed", Sources: []string{"hackernews"}}, nil
+			return Answers{Topics: nil, Style: "boxed", NewsAggregators: []string{"hackernews"}}, nil
 		},
 		Out: &bytes.Buffer{},
 	}
@@ -136,8 +136,10 @@ func TestSettingsFlow_OutputMentionsPath(t *testing.T) {
 	deps := SettingsDeps{
 		ConfigPath: func() (string, error) { return configPath, nil },
 		Current:    func(string) (Answers, error) { return Answers{}, nil },
-		Answers:    func(Answers) (Answers, error) { return Answers{Style: "boxed", Sources: []string{"hackernews"}}, nil },
-		Out:        out,
+		Answers: func(Answers) (Answers, error) {
+			return Answers{Style: "boxed", NewsAggregators: []string{"hackernews"}}, nil
+		},
+		Out: out,
 	}
 	if err := SettingsFlow(deps); err != nil {
 		t.Fatalf("SettingsFlow: %v", err)

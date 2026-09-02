@@ -128,8 +128,9 @@ func pickAnswerSource(in *os.File) func() (onboard.Answers, error) {
 
 // runSettings wires onboard.SettingsFlow to its production dependencies.
 // Reads the existing config from disk (errors if missing — --settings is the
-// edit-existing path, --init is the bootstrap path) and routes the answer
-// collection through the wizard or JSON-stdin depending on TTY status.
+// edit-existing path, --init is the bootstrap path), projects it through
+// settingsAnswers, and routes the answer collection through the wizard or
+// JSON-stdin depending on TTY status.
 func runSettings(out io.Writer) error {
 	return onboard.SettingsFlow(onboard.SettingsDeps{
 		ConfigPath: config.Path,
@@ -138,18 +139,52 @@ func runSettings(out io.Writer) error {
 			if err != nil {
 				return onboard.Answers{}, err
 			}
-			return onboard.Answers{
-				Topics:       cfg.Topics,
-				Style:        cfg.Style,
-				Sources:      cfg.News.Aggregators,
-				Count:        cfg.Count,
-				TickerMarker: cfg.TickerMarker,
-				TickerBoxed:  cfg.TickerBoxed,
-			}, nil
+			return settingsAnswers(cfg), nil
 		},
 		Answers: pickSettingsAnswerSource(os.Stdin),
 		Out:     out,
 	})
+}
+
+// settingsAnswers projects a loaded Config into the Answers shape the
+// --settings surfaces edit. It is a named function rather than an inline
+// closure because it is the read half of a round trip that is lossy by
+// default: onboard.OverwriteConfig regenerates the ENTIRE config file from
+// Answers, so anything this projection drops is erased from the user's disk
+// the first time they run --settings, silently and with no way to recover
+// it. Being able to test it directly is worth the extra name.
+//
+// The MaxItems/Weight pointers are what carry "the user never set this"
+// across the gap between the two representations: config uses a zero value
+// for unset, Answers uses a nil pointer, so zero maps to nil and everything
+// else to an address. An empty feed list maps to nil rather than an empty
+// slice so the writer's nil-means-omit convention sees what it expects.
+func settingsAnswers(cfg config.Config) onboard.Answers {
+	var feeds []onboard.Feed
+	for _, f := range cfg.Following.Feeds {
+		of := onboard.Feed{URL: f.URL}
+		if f.MaxItems != 0 {
+			n := f.MaxItems
+			of.MaxItems = &n
+		}
+		if f.Weight != 0 {
+			w := f.Weight
+			of.Weight = &w
+		}
+		feeds = append(feeds, of)
+	}
+	return onboard.Answers{
+		Topics:          cfg.Topics,
+		Style:           cfg.Style,
+		Pools:           cfg.Pools,
+		PoolOrder:       cfg.PoolOrder,
+		NewsAggregators: cfg.News.Aggregators,
+		Count:           cfg.Count,
+		FollowingCount:  cfg.FollowingCount,
+		Feeds:           feeds,
+		TickerMarker:    cfg.TickerMarker,
+		TickerBoxed:     cfg.TickerBoxed,
+	}
 }
 
 // pickSettingsAnswerSource returns the function SettingsFlow will call to

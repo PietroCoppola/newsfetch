@@ -3,6 +3,7 @@ package onboard
 import (
 	"bytes"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/PietroCoppola/newsfetch/internal/config"
@@ -39,5 +40,31 @@ func TestDefaultInitAnswers_ValidatesCleanly(t *testing.T) {
 	}
 	if got.Style != defaults.Style {
 		t.Errorf("Style = %q, want default %q", got.Style, defaults.Style)
+	}
+}
+
+func TestDefaultInitAnswers_SeedsFollowingDisabled(t *testing.T) {
+	// --init never asks about pools or feeds, so its seeded answers are what
+	// the very first config.toml says about them. Following starts DISABLED
+	// with no feeds: a first-run user gets the working news render they came
+	// for, and an empty Following box would just be noise.
+	a := defaultInitAnswers()
+	if !reflect.DeepEqual(a.Pools, defaults.Pools()) {
+		t.Errorf("Pools = %v, want %v", a.Pools, defaults.Pools())
+	}
+	if !reflect.DeepEqual(a.Pools, []string{"news"}) {
+		t.Errorf("Pools = %v, want [news] (following must not be enabled by default)", a.Pools)
+	}
+	if a.PoolOrder != nil {
+		t.Errorf("PoolOrder = %v, want nil (one pool has nothing to order)", a.PoolOrder)
+	}
+	if a.Feeds != nil {
+		t.Errorf("Feeds = %v, want nil", a.Feeds)
+	}
+	if a.NewsAggregators != nil {
+		t.Errorf("NewsAggregators = %v, want nil so the writer omits [news]", a.NewsAggregators)
+	}
+	if a.FollowingCount != defaults.FollowingCount {
+		t.Errorf("FollowingCount = %d, want %d", a.FollowingCount, defaults.FollowingCount)
 	}
 }

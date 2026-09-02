@@ -93,33 +93,59 @@ func sourceOptions() []huh.Option[string] {
 	return opts
 }
 
+// Feed is one [[following.feeds]] entry as the wizard and the JSON readers
+// see it.
+//
+// MaxItems and Weight are pointers on purpose. In the config file an absent
+// key means "unset" — the loader substitutes defaults.DefaultFeedMaxItems
+// and "no manual weight override" — and a plain int or float64 cannot tell
+// an absent key from a key the user set to zero. The wizard never surfaces
+// either knob (they are TOML/JSON-only advanced settings), so nil is the
+// value a --settings round trip has to carry through untouched. Anything
+// that loses the nil rewrites the user's file with a value they never chose.
+type Feed struct {
+	URL      string
+	MaxItems *int     // nil → key omitted; defaults.DefaultFeedMaxItems applies
+	Weight   *float64 // nil → key omitted; the auto cadence weight applies
+}
+
 // Answers captures wizard / JSON-stdin output for both --init and --settings.
 //
-// Sources is nil-vs-non-nil sensitive: nil means "the caller did not specify
-// sources" (config writers omit the field so future default changes flow
-// through), non-nil means "use exactly these" (config writers emit the line).
+// NewsAggregators is nil-vs-non-nil sensitive: nil means "the caller did not
+// specify aggregators" (the config writer omits the whole [news] table so
+// future default changes flow through), non-nil means "use exactly these"
+// (the writer emits the table). Pools follows the same convention.
 //
-// Count, TickerMarker, and TickerBoxed are persisted unconditionally even
-// when currently inert (e.g. TickerMarker survives a switch from
-// style=boxed to style=minimal). The choice is deliberate: a user who
-// previously tuned the multi-story render expects to find that tuning
-// preserved when they switch back, rather than having to re-pick from
-// defaults. The settings wizard mirrors this by hiding the ticker fields
-// when inert rather than clearing them.
+// Feeds carries the [[following.feeds]] blocks verbatim, including the
+// advanced knobs the wizard does not surface. OverwriteConfig regenerates
+// the entire config file from this struct, so a feed that does not survive
+// the trip from config.Load to here is a feed erased from the user's disk.
+//
+// Count, FollowingCount, TickerMarker, and TickerBoxed are persisted
+// unconditionally even when currently inert (e.g. TickerMarker survives a
+// switch from style=boxed to style=minimal, FollowingCount survives
+// disabling the following pool). The choice is deliberate: a user who
+// previously tuned a render expects to find that tuning preserved when they
+// switch back, rather than having to re-pick from defaults. The settings
+// wizard mirrors this by hiding inert fields rather than clearing them.
 type Answers struct {
-	Topics       []string
-	Style        string
-	Sources      []string // nil → omit from config; non-nil → emit verbatim
-	Count        int
-	TickerMarker string
-	TickerBoxed  bool
+	Topics          []string
+	Style           string
+	Pools           []string // nil → omit from config; non-nil → emit verbatim
+	PoolOrder       []string // emitted only when two or more pools are enabled
+	NewsAggregators []string // nil → omit the [news] table; non-nil → emit verbatim
+	Count           int
+	FollowingCount  int
+	Feeds           []Feed
+	TickerMarker    string
+	TickerBoxed     bool
 }
 
 // RunInitWizard drives the interactive --init UI: a topic multi-select
 // followed by a display-style picker. Sources is intentionally not surfaced —
 // --init is the opinionated onboarding contract; users opt into source
 // selection via --settings or the JSON-stdin power-user path. Returns the
-// user's choices with Sources unset (nil). Not unit-tested — the TUI is
+// user's choices with NewsAggregators unset (nil). Not unit-tested — the TUI is
 // exercised via manual smoke.
 func RunInitWizard() (Answers, error) {
 	a := defaultInitAnswers()
@@ -147,17 +173,26 @@ func RunInitWizard() (Answers, error) {
 // defaultInitAnswers is the starting state for the --init wizard: every
 // field the form does not surface is seeded with its compile-time default
 // so the written config validates cleanly. renderConfigTOML persists
-// count/ticker_marker/ticker_boxed unconditionally on the assumption that
-// producers supply valid values — this seeding is what upholds that
-// assumption for the interactive path, mirroring ReadInitJSON's seeding
-// for the non-TTY path. Style is seeded too so the picker opens on the
-// default rather than an empty selection.
+// count/following_count/ticker_marker/ticker_boxed unconditionally on the
+// assumption that producers supply valid values — this seeding is what
+// upholds that assumption for the interactive path, mirroring
+// ReadInitJSON's seeding for the non-TTY path. Style is seeded too so the
+// picker opens on the default rather than an empty selection.
+//
+// Pools is seeded to defaults.Pools() — news only. Following starts
+// DISABLED with Feeds nil: --init asks two questions and a first-run user
+// has no feeds to put in the pool, so enabling it would only produce an
+// empty box. NewsAggregators stays nil so the writer omits the [news] table
+// entirely and a future change to the default aggregator list reaches the
+// user without them re-running --settings.
 func defaultInitAnswers() Answers {
 	return Answers{
-		Style:        defaults.Style,
-		Count:        defaults.Count,
-		TickerMarker: defaults.TickerMarker,
-		TickerBoxed:  defaults.TickerBoxed,
+		Style:          defaults.Style,
+		Pools:          defaults.Pools(),
+		Count:          defaults.Count,
+		FollowingCount: defaults.FollowingCount,
+		TickerMarker:   defaults.TickerMarker,
+		TickerBoxed:    defaults.TickerBoxed,
 	}
 }
 
@@ -167,16 +202,16 @@ func defaultInitAnswers() Answers {
 // The sources field validates non-empty inline so the user can't save a
 // configuration that would trigger the next-run "sources is empty" warning.
 //
-// Returns the user's edited choices; Answers.Sources is always non-nil
+// Returns the user's edited choices; Answers.NewsAggregators is always non-nil
 // (sources is required and validated). Not unit-tested — manual smoke.
 func RunSettingsWizard(current Answers) (Answers, error) {
 	a := Answers{
-		Topics:       append([]string(nil), current.Topics...),
-		Style:        current.Style,
-		Sources:      append([]string(nil), current.Sources...),
-		Count:        current.Count,
-		TickerMarker: current.TickerMarker,
-		TickerBoxed:  current.TickerBoxed,
+		Topics:          append([]string(nil), current.Topics...),
+		Style:           current.Style,
+		NewsAggregators: append([]string(nil), current.NewsAggregators...),
+		Count:           current.Count,
+		TickerMarker:    current.TickerMarker,
+		TickerBoxed:     current.TickerBoxed,
 	}
 	form := huh.NewForm(
 		// Group 1: always shown. Content config first (topics + sources):
@@ -199,7 +234,7 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 					}
 					return nil
 				}).
-				Value(&a.Sources),
+				Value(&a.NewsAggregators),
 			huh.NewSelect[string]().
 				Title("Display style").
 				Filtering(false).

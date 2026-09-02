@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
+	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
 	"github.com/PietroCoppola/newsfetch/internal/render"
 )
@@ -1011,5 +1014,175 @@ func TestRunDefault_StyleJSON_NothingToShowIsAnEmptyArray(t *testing.T) {
 	}
 	if len(payload) != 0 {
 		t.Errorf("got %d elements, want 0: %s", len(payload), stdout.String())
+	}
+}
+
+// TestSettingsAnswers_PreservesUnsetFeedKnobs pins the read half of the
+// --settings round trip. config.FeedConfig uses a zero value to mean
+// "unset"; onboard.Feed uses a nil pointer. Mapping an unset knob to a
+// non-nil zero pointer would make the writer emit `max_items = 0` into the
+// user's file — a value they never chose and one the loader clamps.
+func TestSettingsAnswers_PreservesUnsetFeedKnobs(t *testing.T) {
+	cases := []struct {
+		name         string
+		in           config.FeedConfig
+		wantMaxItems *int
+		wantWeight   *float64
+	}{
+		{"both unset", config.FeedConfig{URL: "https://a.example/f"}, nil, nil},
+		{"max_items only", config.FeedConfig{URL: "https://a.example/f", MaxItems: 2}, intp(2), nil},
+		{"weight only", config.FeedConfig{URL: "https://a.example/f", Weight: 0.3}, nil, floatp(0.3)},
+		{"both set", config.FeedConfig{URL: "https://a.example/f", MaxItems: 10, Weight: 5}, intp(10), floatp(5)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Following.Feeds = []config.FeedConfig{tc.in}
+			got := settingsAnswers(cfg)
+			if len(got.Feeds) != 1 {
+				t.Fatalf("Feeds = %+v, want exactly one", got.Feeds)
+			}
+			if got.Feeds[0].URL != tc.in.URL {
+				t.Errorf("URL = %q, want %q", got.Feeds[0].URL, tc.in.URL)
+			}
+			if !reflect.DeepEqual(got.Feeds[0].MaxItems, tc.wantMaxItems) {
+				t.Errorf("MaxItems = %v, want %v", derefInt(got.Feeds[0].MaxItems), derefInt(tc.wantMaxItems))
+			}
+			if !reflect.DeepEqual(got.Feeds[0].Weight, tc.wantWeight) {
+				t.Errorf("Weight = %v, want %v", derefFloat(got.Feeds[0].Weight), derefFloat(tc.wantWeight))
+			}
+		})
+	}
+}
+
+func intp(n int) *int { return &n }
+
+func floatp(f float64) *float64 { return &f }
+
+func derefInt(p *int) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%d", *p)
+}
+
+func derefFloat(p *float64) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%v", *p)
+}
+
+// TestSettingsAnswers_ConfigRoundTripIsByteIdentical is the regression guard
+// for the whole task. A --settings run that changes nothing must rewrite the
+// user's file to exactly the bytes it started with; any advanced per-feed
+// knob dropped anywhere between config.Load and renderConfigTOML shows up
+// here as a diff. The fixture is written in renderConfigTOML's own output
+// format so the comparison is a genuine identity, not an approximation.
+func TestSettingsAnswers_ConfigRoundTripIsByteIdentical(t *testing.T) {
+	const fixture = `# newsfetch config. Edit freely; see spec.md for field meanings.
+
+topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+pool_order = ["following", "news"]
+count = 2
+following_count = 1
+ticker_marker = "dot"
+ticker_boxed = false
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://drewdevault.com/blog/index.xml"
+
+[[following.feeds]]
+url = "https://blog.cloudflare.com/rss/"
+max_items = 2
+weight = 0.3
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, settingsAnswers(cfg)); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if string(got) != fixture {
+		t.Errorf("round trip changed the config file\n--- got ---\n%s\n--- want ---\n%s", got, fixture)
+	}
+}
+
+// TestSettingsAnswers_NonFiniteWeightNeverReachesTheFile walks the one path
+// that skips every weight validator. --settings loads config.toml through
+// config.Load WITHOUT calling config.Validate, so a hand-written
+// `weight = nan` — which TOML accepts as a float literal — arrives in
+// settingsAnswers as a genuine NaN, becomes a non-nil *float64 (NaN != 0),
+// and lands in the writer. tomlFloat is the last guard, and this is the
+// only test that exercises it end to end: without it the rewritten file
+// would say `weight = NaN.0`, which is not valid TOML, and the user's next
+// terminal open would fail to load their config at all.
+func TestSettingsAnswers_NonFiniteWeightNeverReachesTheFile(t *testing.T) {
+	const fixture = `topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+count = 1
+following_count = 1
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://a.example/f"
+weight = nan
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	a := settingsAnswers(cfg)
+	// Guard the guard: if the projection ever starts dropping NaN, this
+	// test would pass for the wrong reason and stop covering tomlFloat.
+	if len(a.Feeds) != 1 || a.Feeds[0].Weight == nil || !math.IsNaN(*a.Feeds[0].Weight) {
+		t.Fatalf("fixture no longer carries a NaN weight into the writer: %+v", a.Feeds)
+	}
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, a); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if strings.Contains(string(data), "weight") {
+		t.Errorf("a non-finite weight was written back:\n%s", data)
+	}
+	// The real damage is unloadability, so assert that directly rather than
+	// trusting the substring check to have caught every bad spelling.
+	back, err := config.Load(out)
+	if err != nil {
+		t.Fatalf("rewritten config no longer loads: %v", err)
+	}
+	if len(back.Following.Feeds) != 1 {
+		t.Fatalf("Following.Feeds = %+v, want the feed preserved", back.Following.Feeds)
+	}
+	if back.Following.Feeds[0].Weight != 0 {
+		t.Errorf("Weight = %v, want 0 (omitted means no manual override)", back.Following.Feeds[0].Weight)
 	}
 }

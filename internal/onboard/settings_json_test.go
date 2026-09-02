@@ -10,12 +10,12 @@ import (
 // would have loaded the existing config. Holds non-default ticker values
 // so tests can assert preservation through omission.
 var curr = Answers{
-	Topics:       nil,
-	Style:        "boxed",
-	Sources:      []string{"hackernews"},
-	Count:        1,
-	TickerMarker: "branch",
-	TickerBoxed:  true,
+	Topics:          nil,
+	Style:           "boxed",
+	NewsAggregators: []string{"hackernews"},
+	Count:           1,
+	TickerMarker:    "branch",
+	TickerBoxed:     true,
 }
 
 func TestReadSettingsJSON_Valid(t *testing.T) {
@@ -26,12 +26,12 @@ func TestReadSettingsJSON_Valid(t *testing.T) {
 		t.Fatalf("ReadSettingsJSON: %v", err)
 	}
 	want := Answers{
-		Topics:       []string{"rust"},
-		Style:        "boxed",
-		Sources:      []string{"hackernews", "lobsters"},
-		Count:        3,
-		TickerMarker: "arrow",
-		TickerBoxed:  false,
+		Topics:          []string{"rust"},
+		Style:           "boxed",
+		NewsAggregators: []string{"hackernews", "lobsters"},
+		Count:           3,
+		TickerMarker:    "arrow",
+		TickerBoxed:     false,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)

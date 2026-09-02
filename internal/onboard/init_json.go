@@ -64,7 +64,7 @@ func ReadInitJSON(r io.Reader) (Answers, error) {
 		if err := validateSources("--init", *raw.Sources); err != nil {
 			return Answers{}, err
 		}
-		a.Sources = *raw.Sources
+		a.NewsAggregators = *raw.Sources
 	}
 	if raw.Count != nil {
 		if err := validateCount("--init", *raw.Count); err != nil {

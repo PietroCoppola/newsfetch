@@ -23,8 +23,8 @@ func TestReadInitJSON_Valid(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
-	if got.Sources != nil {
-		t.Errorf("Sources should be nil when omitted; got %v", got.Sources)
+	if got.NewsAggregators != nil {
+		t.Errorf("NewsAggregators should be nil when omitted; got %v", got.NewsAggregators)
 	}
 }
 
@@ -72,13 +72,13 @@ func TestReadInitJSON_EmptyTopicsAllowed(t *testing.T) {
 	}
 }
 
-func TestReadInitJSON_SourcesOptional_PowerUser(t *testing.T) {
+func TestReadInitJSON_AggregatorsOptional_PowerUser(t *testing.T) {
 	got, err := ReadInitJSON(strings.NewReader(`{"topics":[],"style":"boxed","sources":["hackernews","lobsters"]}`))
 	if err != nil {
 		t.Fatalf("ReadInitJSON: %v", err)
 	}
-	if !reflect.DeepEqual(got.Sources, []string{"hackernews", "lobsters"}) {
-		t.Errorf("Sources = %v, want [hackernews lobsters]", got.Sources)
+	if !reflect.DeepEqual(got.NewsAggregators, []string{"hackernews", "lobsters"}) {
+		t.Errorf("NewsAggregators = %v, want [hackernews lobsters]", got.NewsAggregators)
 	}
 }
 

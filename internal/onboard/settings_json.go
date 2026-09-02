@@ -58,12 +58,12 @@ func ReadSettingsJSON(r io.Reader, current Answers) (Answers, error) {
 		return Answers{}, err
 	}
 	a := Answers{
-		Topics:       *raw.Topics,
-		Style:        *raw.Style,
-		Sources:      *raw.Sources,
-		Count:        *raw.Count,
-		TickerMarker: current.TickerMarker,
-		TickerBoxed:  current.TickerBoxed,
+		Topics:          *raw.Topics,
+		Style:           *raw.Style,
+		NewsAggregators: *raw.Sources,
+		Count:           *raw.Count,
+		TickerMarker:    current.TickerMarker,
+		TickerBoxed:     current.TickerBoxed,
 	}
 	if raw.TickerMarker != nil {
 		if err := validateTickerMarker("--settings", *raw.TickerMarker); err != nil {
