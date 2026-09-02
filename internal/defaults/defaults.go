@@ -100,6 +100,73 @@ func Sources() []string {
 }
 
 const (
+	// FollowingCount is the default number of stories rendered from the
+	// following pool. It is a separate knob from Count rather than a reuse
+	// of it because the two answer different questions: Count says how much
+	// of an aggregator firehose to sample, while a feed the user chose
+	// themselves earns a slot even from someone who only ever wants one
+	// headline.
+	FollowingCount = 1
+)
+
+const (
+	// FollowingFetchTimeout bounds one whole following-pool fan-out. It is
+	// deliberately larger than FetchTimeout: the fan-out runs only inside
+	// the detached refresh process and never on a render path, and a parent
+	// smaller than FollowingPerFeedTimeout would clip every per-feed budget
+	// to nothing.
+	FollowingFetchTimeout = 15 * time.Second
+
+	// FollowingPerFeedTimeout bounds one feed request inside the fan-out so
+	// a single slow host cannot spend the whole parent budget and starve
+	// the feeds behind it.
+	FollowingPerFeedTimeout = 10 * time.Second
+)
+
+// Pools returns the default pool enable list as a fresh copy per call,
+// matching the Sources registry convention. Following ships disabled
+// because a first-run user has configured no feeds, and an enabled pool
+// with an empty internal config renders nothing anyway — enabling it by
+// default would buy startup work and no output.
+func Pools() []string {
+	return []string{"news"}
+}
+
+// PoolOrder returns the compile-time vertical stacking order as a fresh
+// copy per call. Following leads because feeds the user picked deserve the
+// prime slot over an aggregator front page. Every name in KnownPools must
+// appear here: config's pool_order normalisation fills in the pools a user
+// left out by walking this list, so a pool missing from it would be enabled
+// and never rendered.
+func PoolOrder() []string {
+	return []string{"following", "news"}
+}
+
+// KnownPools lists every pool name the binary recognises, as a fresh copy
+// per call. It is deliberately a separate registry from
+// fetch.KnownSourceNames: following is a pool, not an aggregator, and
+// keeping the two lists apart is what makes aggregators = ["following"]
+// impossible to spell.
+func KnownPools() []string {
+	return []string{"news", "following"}
+}
+
+// PoolLabel returns the box header shown for a pool, or "" for a name that
+// is not a known pool. Labels live in defaults rather than in render
+// because config imports render, so render can never import config;
+// defaults is the leaf package both sides already depend on.
+func PoolLabel(pool string) string {
+	switch pool {
+	case "news":
+		return "News"
+	case "following":
+		return "Following"
+	default:
+		return ""
+	}
+}
+
+const (
 	// CacheTTL is the stale-while-revalidate window. Reads newer than this
 	// render without spawning a background refresh.
 	CacheTTL = 30 * time.Minute
