@@ -348,6 +348,14 @@ func TestStatusline_PinnedAndUnpinnedPathsAgree(t *testing.T) {
 // the real holder still has the lock open, the probe sees
 // lockfile.ErrHeld; once session.update's defer has closed it, the probe's
 // acquire succeeds.
+//
+// The probe records EVERY invocation rather than only the last one. A
+// single shared variable overwritten by each call would pass a mutation
+// that adds a second, in-lock spawnRefresh call beside the existing
+// post-lock one: the in-lock call would record contention and the later
+// post-lock call would silently overwrite it with success. Contention on
+// any call is a failure, so calls and contended are counted across the
+// whole invocation and asserted at the end.
 func TestStatusline_PinnedRefreshSpawnsOutsideLock(t *testing.T) {
 	isolateXDG(t)
 	// A cache older than the TTL is what makes the pinned path set
@@ -360,14 +368,18 @@ func TestStatusline_PinnedRefreshSpawnsOutsideLock(t *testing.T) {
 	}
 	lockPath := filepath.Join(filepath.Dir(sPath), "sessions.lock")
 
-	probed := false
-	var acquireErr error
+	var calls, contended int
+	var otherErr error
 	restore := spawnRefresh
 	spawnRefresh = func() {
-		probed = true
+		calls++
 		lock, err := lockfile.Acquire(lockPath, 0)
-		acquireErr = err
-		if err == nil {
+		switch {
+		case errors.Is(err, lockfile.ErrHeld):
+			contended++
+		case err != nil:
+			otherErr = err
+		default:
 			lock.Close()
 		}
 	}
@@ -377,13 +389,13 @@ func TestStatusline_PinnedRefreshSpawnsOutsideLock(t *testing.T) {
 	if out == "" {
 		t.Fatal("pinned render produced no output")
 	}
-	if !probed {
+	if calls == 0 {
 		t.Fatal("spawnRefresh was never called; the seeded cache should have been stale enough to force it")
 	}
-	if errors.Is(acquireErr, lockfile.ErrHeld) {
-		t.Fatal("spawnRefresh ran while sessions.lock was still held: the refresh is being spawned inside session.GetOrCreate's critical section")
+	if contended > 0 {
+		t.Fatalf("spawnRefresh ran while sessions.lock was still held on %d of %d call(s): the refresh is being spawned inside session.GetOrCreate's critical section", contended, calls)
 	}
-	if acquireErr != nil {
-		t.Fatalf("probe could not acquire sessions.lock for an unrelated reason: %v", acquireErr)
+	if otherErr != nil {
+		t.Fatalf("probe could not acquire sessions.lock for an unrelated reason: %v", otherErr)
 	}
 }
