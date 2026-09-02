@@ -292,31 +292,40 @@ func TestValidate_MinPointsNegative(t *testing.T) {
 	}
 }
 
-func TestValidate_SourcesEmpty(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.News.Aggregators = []string{}
-	var buf bytes.Buffer
-	got := config.Validate(cfg, config.FieldSources{}, &buf)
-	if !reflect.DeepEqual(got.News.Aggregators, config.Defaults().News.Aggregators) {
-		t.Errorf("News.Aggregators = %v, want defaults %v", got.News.Aggregators, config.Defaults().News.Aggregators)
-	}
-	if !strings.Contains(buf.String(), "sources is empty") {
-		t.Errorf("warning text missing: %q", buf.String())
-	}
-}
-
-func TestValidate_SourcesAllUnknownDropped(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.News.Aggregators = []string{"weirdsrc", "another"}
-	var buf bytes.Buffer
-	got := config.Validate(cfg, config.FieldSources{}, &buf)
-	if !reflect.DeepEqual(got.News.Aggregators, config.Defaults().News.Aggregators) {
-		t.Errorf("News.Aggregators = %v, want defaults", got.News.Aggregators)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "no recognised names") || !strings.Contains(out, "weirdsrc") {
-		t.Errorf("warning missing dropped names: %q", out)
-	}
+// TestValidate_AggregatorsAllUnknownDropped covers both sides of the
+// cascade split. With another pool still holding content, the aggregator
+// warning fires and names what it dropped. With nothing else to render, the
+// all-empty rule wins the single warning slot instead — deliberately, since
+// its message describes the correction that actually happened rather than
+// printing an empty list silentlyCorrect is about to overwrite.
+func TestValidate_AggregatorsAllUnknownDropped(t *testing.T) {
+	t.Run("following still has content", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.Pools = []string{"news", "following"}
+		cfg.News.Aggregators = []string{"weirdsrc", "another"}
+		cfg.Following.Feeds = []config.FeedConfig{validFeed()}
+		var buf bytes.Buffer
+		got := config.Validate(cfg, config.FieldSources{}, &buf)
+		if len(got.News.Aggregators) != 0 {
+			t.Errorf("News.Aggregators = %v, want empty", got.News.Aggregators)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "weirdsrc") || !strings.Contains(out, "dropped") {
+			t.Errorf("warning missing dropped names: %q", out)
+		}
+	})
+	t.Run("nothing else to render", func(t *testing.T) {
+		cfg := config.Defaults()
+		cfg.News.Aggregators = []string{"weirdsrc", "another"}
+		var buf bytes.Buffer
+		got := config.Validate(cfg, config.FieldSources{}, &buf)
+		if !reflect.DeepEqual(got.News.Aggregators, defaults.Sources()) {
+			t.Errorf("News.Aggregators = %v, want %v", got.News.Aggregators, defaults.Sources())
+		}
+		if !strings.Contains(buf.String(), "produced no content") {
+			t.Errorf("warning text missing: %q", buf.String())
+		}
+	})
 }
 
 func TestValidate_SourcesPartialUnknownDropped(t *testing.T) {
@@ -797,5 +806,214 @@ func TestDefaults_PoolLayer(t *testing.T) {
 	}
 	if got.FollowingCount != defaults.FollowingCount {
 		t.Errorf("FollowingCount = %d, want %d", got.FollowingCount, defaults.FollowingCount)
+	}
+}
+
+// validFeed is the fixture feed used wherever a test needs the following
+// pool to have content without caring what that content is.
+func validFeed() config.FeedConfig {
+	return config.FeedConfig{URL: "https://a.example/feed.xml"}
+}
+
+func TestValidate_UnknownPoolDropped(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "repos"}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Pools, []string{"news"}) {
+		t.Errorf("Pools = %v, want [news]", got.Pools)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "repos") || !strings.Contains(out, "dropped") {
+		t.Errorf("warning missing the dropped name: %q", out)
+	}
+}
+
+func TestValidate_DuplicatePoolsCollapsed(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "news"}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Pools, []string{"news"}) {
+		t.Errorf("Pools = %v, want [news]; a pool listed twice would render twice", got.Pools)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("collapsing a duplicate should be silent; got %q", buf.String())
+	}
+}
+
+func TestValidate_PoolsEmptyFallsBack(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Pools, defaults.Pools()) {
+		t.Errorf("Pools = %v, want %v", got.Pools, defaults.Pools())
+	}
+	if !strings.Contains(buf.String(), "pools is empty") {
+		t.Errorf("warning text missing: %q", buf.String())
+	}
+}
+
+func TestValidate_PoolsAllUnknownFallsBack(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"repos", "weather"}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if !reflect.DeepEqual(got.Pools, defaults.Pools()) {
+		t.Errorf("Pools = %v, want %v", got.Pools, defaults.Pools())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "no recognised names") || !strings.Contains(out, "repos") {
+		t.Errorf("warning missing dropped names: %q", out)
+	}
+}
+
+// TestValidate_PoolOrderNormalised pins the silent permutation rule. Every
+// case must produce a PoolOrder that is exactly the enabled set, in a
+// deterministic order, with no warning: a user who enables a pool and
+// forgets to name it in pool_order has not made a mistake worth a line of
+// stderr on every terminal open.
+func TestValidate_PoolOrderNormalised(t *testing.T) {
+	cases := []struct {
+		name  string
+		pools []string
+		order []string
+		want  []string
+	}{
+		{"already a permutation", []string{"news", "following"}, []string{"news", "following"}, []string{"news", "following"}},
+		{"reordered by the user", []string{"news", "following"}, []string{"following", "news"}, []string{"following", "news"}},
+		{"missing pool appended", []string{"news", "following"}, []string{"news"}, []string{"news", "following"}},
+		{"empty order falls back to compile-time order", []string{"news", "following"}, nil, []string{"following", "news"}},
+		{"unknown name dropped", []string{"news", "following"}, []string{"repos", "following", "news"}, []string{"following", "news"}},
+		{"disabled pool dropped", []string{"news"}, []string{"following", "news"}, []string{"news"}},
+		{"duplicates collapsed", []string{"news", "following"}, []string{"news", "news", "following"}, []string{"news", "following"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Pools = tc.pools
+			cfg.PoolOrder = tc.order
+			var buf bytes.Buffer
+			got := config.Validate(cfg, config.FieldSources{}, &buf)
+			if !reflect.DeepEqual(got.PoolOrder, tc.want) {
+				t.Errorf("PoolOrder = %v, want %v", got.PoolOrder, tc.want)
+			}
+			if buf.Len() != 0 {
+				t.Errorf("pool_order normalisation must be silent; got %q", buf.String())
+			}
+		})
+	}
+}
+
+// TestValidate_FollowingIsNotAnAggregator is the negative-requirement
+// regression test for the registry split. `following` is a pool, not an
+// aggregator: it must stay unspellable in [news] aggregators, and
+// cmd/newsfetch's newSource factory must stay without a "following" case.
+func TestValidate_FollowingIsNotAnAggregator(t *testing.T) {
+	for _, name := range fetch.KnownSourceNames() {
+		if name == "following" {
+			t.Fatal("fetch.KnownSourceNames lists \"following\"; the following pool must never be an aggregator")
+		}
+	}
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.News.Aggregators = []string{"following"}
+	cfg.Following.Feeds = []config.FeedConfig{validFeed()}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	for _, a := range got.News.Aggregators {
+		if a == "following" {
+			t.Errorf("News.Aggregators = %v, want \"following\" dropped", got.News.Aggregators)
+		}
+	}
+	out := buf.String()
+	if !strings.Contains(out, "following") || !strings.Contains(out, "dropped") {
+		t.Errorf("warning should name the dropped aggregator: %q", out)
+	}
+}
+
+// TestValidate_AggregatorsEmptyIsSilent pins the rule that an empty
+// aggregator list is allowed: the news pool simply renders nothing, exactly
+// like any other pool with an empty internal config. It is the all-empty
+// rule below, not this one, that catches a config left with nothing to show.
+func TestValidate_AggregatorsEmptyIsSilent(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.News.Aggregators = []string{}
+	cfg.Following.Feeds = []config.FeedConfig{validFeed()}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	if len(got.News.Aggregators) != 0 {
+		t.Errorf("News.Aggregators = %v, want left empty", got.News.Aggregators)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("an empty aggregator list must be silent; got %q", buf.String())
+	}
+}
+
+// TestValidate_AllPoolsEmptyRestoresBoth pins that the fallback repairs
+// BOTH halves. Resetting pools alone is a no-op when news is already
+// enabled with zero aggregators — the warning would announce a fix that
+// changed nothing.
+func TestValidate_AllPoolsEmptyRestoresBoth(t *testing.T) {
+	cases := []struct {
+		name  string
+		pools []string
+		aggs  []string
+	}{
+		{"news only, no aggregators", []string{"news"}, []string{}},
+		{"both pools, neither has content", []string{"news", "following"}, []string{}},
+		{"following only, no feeds", []string{"following"}, []string{"hackernews"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Pools = tc.pools
+			cfg.News.Aggregators = tc.aggs
+			cfg.Following.Feeds = nil
+			var buf bytes.Buffer
+			got := config.Validate(cfg, config.FieldSources{}, &buf)
+			if !reflect.DeepEqual(got.Pools, defaults.Pools()) {
+				t.Errorf("Pools = %v, want %v", got.Pools, defaults.Pools())
+			}
+			if !reflect.DeepEqual(got.News.Aggregators, defaults.Sources()) {
+				t.Errorf("News.Aggregators = %v, want %v", got.News.Aggregators, defaults.Sources())
+			}
+			if !strings.Contains(buf.String(), "produced no content") {
+				t.Errorf("warning text missing: %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestValidate_FollowingCountClamped(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       int
+		want     int
+		wantWarn bool
+	}{
+		{"zero clamps up", 0, 1, true},
+		{"negative clamps up", -3, 1, true},
+		{"one is fine", 1, 1, false},
+		{"max is fine", defaults.MaxCount, defaults.MaxCount, false},
+		{"above max clamps down", defaults.MaxCount + 1, defaults.MaxCount, true},
+		{"absurd clamps down", 99, defaults.MaxCount, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.FollowingCount = tc.in
+			var buf bytes.Buffer
+			got := config.Validate(cfg, config.FieldSources{}, &buf)
+			if got.FollowingCount != tc.want {
+				t.Errorf("FollowingCount = %d, want %d", got.FollowingCount, tc.want)
+			}
+			warned := strings.Contains(buf.String(), "following_count")
+			if warned != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; output %q", warned, tc.wantWarn, buf.String())
+			}
+		})
 	}
 }

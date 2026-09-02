@@ -34,18 +34,47 @@ const minCacheTTL = 5 * time.Minute
 //
 // Precedence of warnings when multiple fields are bad (first wins):
 //  1. unknown style
-//  2. sources empty or all-unknown
-//  3. cache_ttl_minutes below minimum
-//  4. min_points below 0
-//  5. count out of [1, MaxCount]
-//  6. unknown ticker_marker
-//  7. dedup_ttl_hours negative
+//  2. pools empty or all-unknown
+//  3. unknown pool name(s) dropped
+//  4. every enabled pool has an empty internal config
+//  5. unknown [news] aggregators dropped
+//  6. cache_ttl_minutes below minimum
+//  7. min_points below 0
+//  8. count out of [1, MaxCount]
+//  9. following_count out of [1, MaxCount]
+//  10. unknown ticker_marker
+//  11. dedup_ttl_hours negative
+//  12. per-feed problems, aggregated into one line
+//
+// pool_order has no slot in the cascade: it is normalised into a permutation
+// of the enabled pools silently, because a user who enables a pool and
+// forgets to name it in pool_order has not made a mistake worth a line of
+// stderr on every terminal open.
+//
+// Feed problems sit last so a malformed [[following.feeds]] block cannot
+// mask a style or TTL warning, which the user is far more likely to act on.
+// They are checked whether or not the following pool is enabled: the warning
+// is about the config file, which is what the user edits.
 //
 // Every early return must route through silentlyCorrect so fields below the
 // first warning still get clamped. If a new field is added to the cascade,
 // extend silentlyCorrect to cover it.
+//
+// Validate is pure and idempotent — the statusline path runs it a second
+// time against io.Discard, and pool_order's permutation normalisation has to
+// survive that without appending anything twice.
 func Validate(c Config, src FieldSources, w io.Writer) Config {
 	minMins := int(minCacheTTL / time.Minute)
+	// These two corrections happen before the cascade because entries
+	// further down read their results: the all-empty-pools rule must see
+	// the aggregator list AFTER unknown names are dropped and the feed list
+	// AFTER unusable feeds are dropped, or it would mistake garbage for
+	// content and leave the user staring at an empty render.
+	aggValid, aggDropped := splitSources(c.News.Aggregators)
+	c.News.Aggregators = aggValid
+	feeds, feedIss := splitFeeds(c.Following.Feeds)
+	c.Following.Feeds = feeds
+
 	switch c.Style {
 	case "boxed", "minimal", "json":
 	case "statusline":
@@ -67,26 +96,40 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: unknown style %q (%s), using %q\n", bad, sourceLabel(src.Style, "style"), c.Style)
 		return silentlyCorrect(c)
 	}
-	valid, dropped := splitSources(c.News.Aggregators)
-	if len(valid) == 0 {
-		// Either user wrote sources=[], or every name was unknown. Either
-		// way, running with no sources means the renderer would always
-		// hit the offline fallback — fail loud and reset to defaults so
-		// the next invocation actually shows news.
-		c.News.Aggregators = Defaults().News.Aggregators
-		if len(dropped) > 0 {
-			fmt.Fprintf(w, "newsfetch: sources contained no recognised names (dropped: %v); using %v\n", dropped, c.News.Aggregators)
+	poolsValid, poolsDropped := splitPools(c.Pools)
+	if len(poolsValid) == 0 {
+		// Either the user wrote pools=[], or every name was unknown.
+		// Either way nothing would ever render, so fail loud and reset.
+		c.Pools = defaults.Pools()
+		if len(poolsDropped) > 0 {
+			fmt.Fprintf(w, "newsfetch: pools contained no recognised names (dropped: %v); using %v\n", poolsDropped, c.Pools)
 		} else {
-			fmt.Fprintf(w, "newsfetch: sources is empty; using %v\n", c.News.Aggregators)
+			fmt.Fprintf(w, "newsfetch: pools is empty; using %v\n", c.Pools)
 		}
 		return silentlyCorrect(c)
 	}
-	if len(dropped) > 0 {
-		c.News.Aggregators = valid
-		fmt.Fprintf(w, "newsfetch: unknown source name(s) %v dropped; using %v\n", dropped, valid)
+	c.Pools = poolsValid
+	if len(poolsDropped) > 0 {
+		fmt.Fprintf(w, "newsfetch: unknown pool name(s) %v dropped; using %v\n", poolsDropped, c.Pools)
 		return silentlyCorrect(c)
 	}
-	c.News.Aggregators = valid
+	if !anyPoolHasContent(c) {
+		// Restore BOTH halves. Clamping pools alone is a no-op when news
+		// is already enabled with zero aggregators — a warning that
+		// announces a fix which changed nothing is worse than no warning.
+		c.Pools = defaults.Pools()
+		c.News.Aggregators = defaults.Sources()
+		fmt.Fprintf(w, "newsfetch: pools produced no content; using %v with aggregators %v\n", c.Pools, c.News.Aggregators)
+		return silentlyCorrect(c)
+	}
+	if len(aggDropped) > 0 {
+		// Sits below the all-empty rule on purpose: reaching here means
+		// something still has content, so the list printed is the one the
+		// user ends up running with rather than a value silentlyCorrect is
+		// about to overwrite.
+		fmt.Fprintf(w, "newsfetch: unknown aggregator name(s) %v dropped; using %v\n", aggDropped, c.News.Aggregators)
+		return silentlyCorrect(c)
+	}
 	if c.CacheTTL < minCacheTTL {
 		badMins := int(c.CacheTTL / time.Minute)
 		c.CacheTTL = minCacheTTL
@@ -105,6 +148,14 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: count=%d out of [1, %d] (%s), using %d\n", bad, defaults.MaxCount, sourceLabel(src.Count, "count"), c.Count)
 		return silentlyCorrect(c)
 	}
+	if c.FollowingCount < 1 || c.FollowingCount > defaults.MaxCount {
+		// No source label: following_count has no flag, so config is the
+		// only origin a user can have typed it from.
+		bad := c.FollowingCount
+		c.FollowingCount = clampCount(c.FollowingCount)
+		fmt.Fprintf(w, "newsfetch: following_count=%d out of [1, %d] (from config), using %d\n", bad, defaults.MaxCount, c.FollowingCount)
+		return silentlyCorrect(c)
+	}
 	if !knownTickerMarker(c.TickerMarker) {
 		bad := c.TickerMarker
 		c.TickerMarker = Defaults().TickerMarker
@@ -117,7 +168,15 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: dedup_ttl_hours=%d negative, treating as 0 (history dedup disabled)\n", bad)
 		return silentlyCorrect(c)
 	}
-	return c
+	if feedIss.any() {
+		fmt.Fprintf(w, "newsfetch: %s\n", feedIss.warning())
+		return silentlyCorrect(c)
+	}
+	// The clean path routes through silentlyCorrect too, so pool_order
+	// normalisation and the clamps have exactly one implementation rather
+	// than one here and one there that can drift apart. Every clamp is a
+	// no-op by the time we reach this line.
+	return silentlyCorrect(c)
 }
 
 // clampCount snaps Count into [1, MaxCount]. Used by the validator's
@@ -151,12 +210,23 @@ func silentlyCorrect(c Config) Config {
 	if c.MinPoints < 0 {
 		c.MinPoints = 0
 	}
-	if valid, _ := splitSources(c.News.Aggregators); len(valid) == 0 {
-		c.News.Aggregators = Defaults().News.Aggregators
+	if valid, _ := splitPools(c.Pools); len(valid) == 0 {
+		c.Pools = defaults.Pools()
 	} else {
-		c.News.Aggregators = valid
+		c.Pools = valid
 	}
+	c.News.Aggregators, _ = splitSources(c.News.Aggregators)
+	c.Following.Feeds, _ = splitFeeds(c.Following.Feeds)
+	if !anyPoolHasContent(c) {
+		c.Pools = defaults.Pools()
+		c.News.Aggregators = defaults.Sources()
+	}
+	// pool_order is settled last: it is a permutation of the ENABLED pools,
+	// so it can only be computed once every rule that can change Pools has
+	// run.
+	c.PoolOrder = orderPools(c.PoolOrder, c.Pools)
 	c.Count = clampCount(c.Count)
+	c.FollowingCount = clampCount(c.FollowingCount)
 	if !knownTickerMarker(c.TickerMarker) {
 		c.TickerMarker = Defaults().TickerMarker
 	}
@@ -166,8 +236,100 @@ func silentlyCorrect(c Config) Config {
 	return c
 }
 
-// splitSources partitions names into recognised vs unknown, preserving order.
-// Recognition uses fetch.KnownSourceNames as the single source of truth.
+// splitPools partitions pool names into recognised vs unknown, preserving
+// order and collapsing duplicates. Recognition uses defaults.KnownPools and
+// deliberately NOT fetch.KnownSourceNames: following is a pool, not an
+// aggregator, and keeping the two registries apart is exactly what makes
+// aggregators = ["following"] impossible to spell. A duplicate is dropped
+// silently — it is not a mistake worth a warning, but left in place it would
+// render the same pool's box twice.
+func splitPools(names []string) (valid, dropped []string) {
+	seen := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if !knownPool(n) {
+			dropped = append(dropped, n)
+			continue
+		}
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		valid = append(valid, n)
+	}
+	return valid, dropped
+}
+
+func knownPool(name string) bool {
+	for _, k := range defaults.KnownPools() {
+		if k == name {
+			return true
+		}
+	}
+	return false
+}
+
+// orderPools normalises a configured pool_order into a permutation of the
+// enabled pools: names the user listed come first in their order, then any
+// enabled pool they left out, in compile-time order. Disabled names,
+// unknown names and duplicates are dropped.
+//
+// Walking defaults.PoolOrder() for the leftovers is safe because it is
+// pinned to cover every name in defaults.KnownPools (see
+// TestPoolOrder_CoversEveryKnownPool), and splitPools has already dropped
+// anything outside that registry — so every enabled pool is guaranteed a
+// slot and the render path can walk the result without re-checking
+// enablement.
+func orderPools(order, enabled []string) []string {
+	isEnabled := func(name string) bool {
+		for _, e := range enabled {
+			if e == name {
+				return true
+			}
+		}
+		return false
+	}
+	placed := make(map[string]struct{}, len(enabled))
+	var out []string
+	add := func(name string) {
+		if _, done := placed[name]; done || !isEnabled(name) {
+			return
+		}
+		placed[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, n := range order {
+		add(n)
+	}
+	for _, n := range defaults.PoolOrder() {
+		add(n)
+	}
+	return out
+}
+
+// anyPoolHasContent reports whether at least one enabled pool has something
+// to fetch. A pool with an empty internal config renders nothing, so a
+// config where that is true of every enabled pool renders nothing at all,
+// forever, without ever saying why. Unknown names cannot reach here —
+// splitPools drops them first — so the switch needs no default arm.
+func anyPoolHasContent(c Config) bool {
+	for _, p := range c.Pools {
+		switch p {
+		case "news":
+			if len(c.News.Aggregators) > 0 {
+				return true
+			}
+		case "following":
+			if len(c.Following.Feeds) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitSources partitions aggregator names into recognised vs unknown,
+// preserving order. Recognition uses fetch.KnownSourceNames as the single
+// source of truth.
 func splitSources(names []string) (valid, dropped []string) {
 	for _, n := range names {
 		if knownSource(n) {
@@ -187,6 +349,31 @@ func knownSource(name string) bool {
 	}
 	return false
 }
+
+// splitFeeds returns the usable feeds with their per-feed knobs clamped,
+// plus everything that went wrong along the way. Step 6 of this task fills
+// in the per-feed rules.
+func splitFeeds(feeds []FeedConfig) ([]FeedConfig, feedIssues) {
+	var out []FeedConfig
+	var iss feedIssues
+	out = append(out, feeds...)
+	return out, iss
+}
+
+// feedIssues accumulates every per-feed problem in one config so Validate
+// can spend its single warning line on a count instead of one line per feed.
+type feedIssues struct {
+	dropped       int
+	dropReasons   []string
+	adjusted      int
+	adjustReasons []string
+}
+
+func (f feedIssues) any() bool { return f.dropped > 0 || f.adjusted > 0 }
+
+// warning renders the single line Validate prints for every feed problem in
+// the file at once, e.g. "2 feeds dropped: invalid url".
+func (f feedIssues) warning() string { return "" }
 
 // sourceLabel renders the human-readable origin tag in a warning. flagName
 // is the long flag name without leading dashes (e.g. "style", "count");
