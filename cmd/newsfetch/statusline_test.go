@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/history"
+	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/session"
 )
 
@@ -324,5 +326,64 @@ func TestStatusline_PinnedAndUnpinnedPathsAgree(t *testing.T) {
 	pinned := runStatuslineArgs(t, 1, "--style=statusline", "--pin=prompt-1")
 	if pinned != unpinned {
 		t.Errorf("pinned and unpinned paths disagree:\n  pinned = %q\nunpinned = %q", pinned, unpinned)
+	}
+}
+
+// TestStatusline_PinnedRefreshSpawnsOutsideLock pins the invariant the
+// pinned path's stale-flag indirection exists to preserve: spawnRefresh must
+// run only after session.GetOrCreate has released sessions.lock, never from
+// inside its create callback. Spawning inside the callback would extend the
+// critical section that every concurrent statusline render in a busy
+// session contends on — the callback looks like an ordinary function call,
+// so nothing about its shape stops a future tidy-up from inlining the spawn
+// back into it.
+//
+// It swaps spawnRefresh for a probe that tries to acquire sessions.lock
+// itself with a zero timeout, using lockfile.Acquire directly rather than
+// going through session.Read/Pin — a probe that goes through the package's
+// own RMW helpers would itself need the lock and could never observe
+// contention. Flock locks are scoped to the open file description, not the
+// process, so the probe's independent os.OpenFile really does contend with
+// session.update's still-open lock file if the spawn fires too early: while
+// the real holder still has the lock open, the probe sees
+// lockfile.ErrHeld; once session.update's defer has closed it, the probe's
+// acquire succeeds.
+func TestStatusline_PinnedRefreshSpawnsOutsideLock(t *testing.T) {
+	isolateXDG(t)
+	// A cache older than the TTL is what makes the pinned path set
+	// needRefresh = true and call spawnRefresh at all.
+	seedNewsPool(t, 1, time.Now().UTC().Add(-90*time.Minute))
+
+	sPath, err := session.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(filepath.Dir(sPath), "sessions.lock")
+
+	probed := false
+	var acquireErr error
+	restore := spawnRefresh
+	spawnRefresh = func() {
+		probed = true
+		lock, err := lockfile.Acquire(lockPath, 0)
+		acquireErr = err
+		if err == nil {
+			lock.Close()
+		}
+	}
+	t.Cleanup(func() { spawnRefresh = restore })
+
+	out := runStatuslineArgs(t, 1, "--style=statusline", "--pin=prompt-1")
+	if out == "" {
+		t.Fatal("pinned render produced no output")
+	}
+	if !probed {
+		t.Fatal("spawnRefresh was never called; the seeded cache should have been stale enough to force it")
+	}
+	if errors.Is(acquireErr, lockfile.ErrHeld) {
+		t.Fatal("spawnRefresh ran while sessions.lock was still held: the refresh is being spawned inside session.GetOrCreate's critical section")
+	}
+	if acquireErr != nil {
+		t.Fatalf("probe could not acquire sessions.lock for an unrelated reason: %v", acquireErr)
 	}
 }
