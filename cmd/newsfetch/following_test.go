@@ -732,6 +732,23 @@ func TestRefreshFollowing_AllFeedsFailedWritesNothing(t *testing.T) {
 // feed not in its configured list, so one refresh that reached Update with
 // an empty list would wipe four weeks of cadence history and every stored
 // validator. The pool must be skipped whole instead.
+//
+// Both subtests assert newFollowing is never constructed. That assertion
+// is load-bearing for "pool enabled with no feeds": cfg.FeedSpecs() is nil
+// for that case too, so if FollowingActive()'s guard were deleted,
+// refreshFollowing would still fall through to the unrelated "empty
+// fan-out is nothing to do" branch (FetchFeeds' (nil, nil, nil) for zero
+// feeds) and leave feeds.json and following.json byte-identical — the
+// file-content assertions below would pass on a guard that no longer
+// exists. Only "was the fan-out client ever built" tells them apart:
+// with the guard, refreshFollowing returns before reaching
+// newFollowing(cfg.FeedSpecs(), validators); without it, that call still
+// happens (with an empty spec slice) even though nothing downstream
+// changes on disk. "pool disabled but feeds still configured" does not
+// need this to discriminate — deleting the guard there sends a real feed
+// spec into the fan-out and refreshFollowing returns a non-nil error from
+// the unreachable host, which the err-is-nil check above already catches
+// — but the same assertion costs nothing extra to hold for both.
 func TestRefreshFollowing_SkipsWithoutTouchingFeedState(t *testing.T) {
 	const feed = "https://feed.example.com/feed.xml"
 	cases := []struct {
@@ -767,8 +784,19 @@ func TestRefreshFollowing_SkipsWithoutTouchingFeedState(t *testing.T) {
 				t.Fatalf("read seeded feeds.json: %v", err)
 			}
 
+			called := false
+			original := newFollowing
+			newFollowing = func(specs []fetch.FeedSpec, validators func(string) (string, string)) *fetch.Following {
+				called = true
+				return original(specs, validators)
+			}
+			t.Cleanup(func() { newFollowing = original })
+
 			if err := refreshFollowing(context.Background(), tc.cfg(config.Defaults()), now); err != nil {
 				t.Fatalf("refreshFollowing() = %v, want nil for a skipped pool", err)
+			}
+			if called {
+				t.Error("newFollowing was constructed for a skipped pool; FollowingActive() must return before the fan-out client is built")
 			}
 
 			after, err := os.ReadFile(fsPath)
@@ -826,5 +854,54 @@ func TestRefreshFollowing_EmptyFanOutIsNothingToDo(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Errorf("following.json was rewritten from an empty fan-out:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// TestRefreshFollowing_CacheAndFeedstateShareTimestamp pins the ordering
+// note on refreshFollowing: writeCache and feedstate.Update must be handed
+// the SAME now, or following.json's FetchedAt (freshness) and feeds.json's
+// ObservedAt (the clock cadence weighting reads) can disagree about when a
+// refresh happened. now is a fixed, non-current value so the assertion is
+// on an exact value rather than "these are close together" — a tolerance
+// check would still pass if feedstate.Update read a fresh time.Now().UTC()
+// instead of the now threaded through from the caller.
+func TestRefreshFollowing_CacheAndFeedstateShareTimestamp(t *testing.T) {
+	isolateXDG(t)
+
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, rssDoc(rssEntry("Fresh", "https://feed.example.com/new", "2026-09-01T10:00:00Z")))
+	}))
+	defer srv.Close()
+
+	feed := srv.URL + "/feed.xml"
+	fsPath := seedFeedState(t, []string{feed}, []feedstate.Observation{
+		{URL: feed, PubDates: []time.Time{now.Add(-24 * time.Hour)}, Items: 1, DatesKnown: true},
+	}, now.Add(-time.Hour))
+	cachePath := seedFollowingCache(t, []fetch.Story{storyFor(feed, "https://feed.example.com/old")}, now.Add(-2*time.Hour))
+
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.Following = config.FollowingConfig{Feeds: []config.FeedConfig{{URL: feed}}}
+
+	if err := refreshFollowing(context.Background(), cfg, now); err != nil {
+		t.Fatalf("refreshFollowing: %v", err)
+	}
+
+	f, err := cache.Read(cachePath)
+	if err != nil {
+		t.Fatalf("read following.json: %v", err)
+	}
+	if !f.FetchedAt.Equal(now) {
+		t.Fatalf("cache FetchedAt = %s, want %s (test setup broken, not the property under test)", f.FetchedAt, now)
+	}
+
+	state, err := feedstate.Read(fsPath)
+	if err != nil {
+		t.Fatalf("read feeds.json: %v", err)
+	}
+	if got := feedStateFor(t, state, feed).ObservedAt; !got.Equal(now) {
+		t.Errorf("feeds.json ObservedAt = %s, want %s — the cadence update must record the SAME now the cache write recorded, or freshness and cadence weighting can disagree about when this refresh happened", got, now)
 	}
 }
