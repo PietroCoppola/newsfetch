@@ -61,15 +61,35 @@ func boxedLabelled(s fetch.Story, now time.Time, width int, label string) string
 }
 
 // topBorder builds a box's top edge, width columns wide, with no trailing
-// newline. Three call sites used to build this line inline, which is one
-// copy per box shape and three places for the label work to miss; this is
-// now the only place the edge is spelled out.
+// newline. It is the single home for that edge so every box in the package
+// keeps the same shape.
 //
-// The label argument is accepted but deliberately ignored for now: the
-// labelled branch arrives with the multi-pool header, and routing every
-// call site first keeps that change to one function instead of three.
+// A non-empty label is written into the border as "╭─ Label ───". The label
+// never widens the box: stacked pool boxes must align, so a label that will
+// not fit is truncated, and one that cannot be truncated to at least one
+// rune is dropped in favour of the plain border. That is also what keeps
+// strings.Repeat off a negative count at pathological widths.
 func topBorder(width int, label string) string {
-	n := width - 2
+	const (
+		// corners, the one leading dash, and the two spaces around the label
+		labelChrome = 5
+		// corners only
+		plainChrome = 2
+	)
+	if label != "" {
+		fill := width - labelChrome - utf8.RuneCountInString(label)
+		if fill < 1 {
+			// Leave room for exactly one trailing dash, then re-measure:
+			// truncate can only shrink the label, so fill lands at >= 1
+			// unless the width cannot hold a label at all.
+			label = truncate(label, width-labelChrome-1)
+			fill = width - labelChrome - utf8.RuneCountInString(label)
+		}
+		if fill >= 1 {
+			return boxTopLeft + boxHoriz + " " + label + " " + strings.Repeat(boxHoriz, fill) + boxTopRight
+		}
+	}
+	n := width - plainChrome
 	if n < 0 {
 		n = 0
 	}

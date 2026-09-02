@@ -85,3 +85,38 @@ func cutLine(s string) (line, rest string, ok bool) {
 	}
 	return "", s, false
 }
+
+// TestTopBorder_Labelled pins ruling R-19: a label is written into the
+// border, truncated when it does not fit, and dropped entirely when even a
+// truncated label cannot leave one trailing dash. The box never widens —
+// stacked pool boxes have to align, and a widened box also feeds a negative
+// strings.Repeat count, which is how this class of bug shipped once before.
+func TestTopBorder_Labelled(t *testing.T) {
+	cases := []struct {
+		name  string
+		width int
+		label string
+		want  string
+	}{
+		{"label fits with room to spare", 50, "Following", "╭─ Following ────────────────────────────────────╮"},
+		{"short label fits", 50, "News", "╭─ News ─────────────────────────────────────────╮"},
+		{"label fits with exactly one trailing dash", 15, "Following", "╭─ Following ─╮"},
+		{"label truncated to fit", 14, "Following", "╭─ Followi… ─╮"},
+		{"label truncated to the ellipsis alone", 7, "Following", "╭─ … ─╮"},
+		{"too narrow for any label falls back to plain", 6, "Following", "╭────╮"},
+		{"pathologically narrow falls back to plain", 3, "News", "╭─╮"},
+		{"empty label is the plain border", 50, "", "╭────────────────────────────────────────────────╮"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := topBorder(tc.width, tc.label)
+			if got != tc.want {
+				t.Errorf("topBorder(%d, %q) = %q, want %q", tc.width, tc.label, got, tc.want)
+			}
+			if n := utf8.RuneCountInString(got); n != tc.width {
+				t.Errorf("topBorder(%d, %q) is %d columns, want exactly %d — the label must never resize the box",
+					tc.width, tc.label, n, tc.width)
+			}
+		})
+	}
+}
