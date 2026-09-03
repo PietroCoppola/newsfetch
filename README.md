@@ -123,11 +123,22 @@ keeps prior tuning intact instead of reverting to defaults.
 **Deprecated: the top-level `sources` key.** Configs written before v0.7.0
 used a top-level `sources` list instead of pools. It is still read, and
 aliased to `pools = ["news"]` plus the `[news] aggregators` list, so
-existing configs keep working untouched — newsfetch never rewrites your
-config file, because a machine round-trip through the TOML encoder would
-lose your comments and formatting. If both spellings are present and
-`pools` is absent, `[news] aggregators` wins and `sources` is ignored.
-Run `newsfetch --settings` when you want the new keys written out.
+existing configs keep working untouched — the read path that runs on every
+render never rewrites your config file, alias included.
+
+`newsfetch --settings` does rewrite it: saving regenerates the whole file
+from scratch rather than patching it in place. Every *documented* setting
+you don't touch in that edit survives unchanged — including the three
+advanced, wizard-hidden keys (`cache_ttl_minutes`, `min_points`,
+`dedup_ttl_hours`) and a feed's `max_items`/`weight`, which the wizard never
+shows either. What a settings save does **not** preserve: comments,
+blank-line grouping, key ordering, and any key newsfetch doesn't recognize
+— those come from a machine round-trip through the TOML encoder, which has
+no notion of any of the four. Run `newsfetch --settings` when you want the
+new keys written out; that save is also what retires `sources` for good,
+since the regenerated file speaks `pools` / `[news] aggregators` from then
+on. If both spellings are present and `pools` is absent, `[news]
+aggregators` wins and `sources` is ignored.
 
 Note that the JSON wizard input below does **not** accept the old key —
 unknown fields are rejected by name. The asymmetry is deliberate: the TOML
