@@ -592,7 +592,9 @@ Render one piece of tech news. Run without flags for the default boxed panel.
 Per-render overrides (apply to this invocation only; config untouched):
   --style=<mode>    display mode for this render: boxed (default) | minimal | json | statusline
   --topics=<list>   topic bias for this render, comma-separated; '--topics=' defeats config
-  --count=<n>       number of stories this render: 1..4 (default 1)
+  --count=<n>       number of stories this render from the news pool: 1..4
+                    (default 1; the following pool uses following_count,
+                    config-only — M5 adds no new flags)
   --pin=<key>       statusline style: pin story selection to this key so
                     repeated renders stay stable; default reads prompt_id
                     (fallback session_id) from JSON on stdin
@@ -603,12 +605,18 @@ Subcommands:
   --init            interactive setup: pick topics, style, patch shell rc
                     if stdin is not a TTY, reads JSON instead:
                       {"topics": ["rust"], "style": "boxed"}
-                      sources, count, ticker_marker, ticker_boxed are optional
-  --settings        edit existing config: topics, style, sources, count, ticker
+                      optional: pools, pool_order, count, following_count,
+                      ticker_marker, ticker_boxed,
+                      news: {aggregators: [...]},
+                      following: {feeds: [{url, max_items, weight}]}
+  --settings        edit existing config: topics, style, pools, feeds,
+                    counts, ticker
                     if stdin is not a TTY, reads JSON instead:
                       {"topics": ["rust"], "style": "boxed",
-                       "sources": ["hackernews"], "count": 1}
-                      first four required; ticker_marker, ticker_boxed optional
+                       "pools": ["news"], "count": 1,
+                       "news": {"aggregators": ["hackernews"]}}
+                      topics, style, pools, count required; everything
+                      else optional and preserved from current config
   --uninstall       remove the newsfetch block from your shell rc
 
   --version         print version and exit
