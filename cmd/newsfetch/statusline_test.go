@@ -401,6 +401,56 @@ func TestStatusline_PinnedRefreshSpawnsOutsideLock(t *testing.T) {
 	}
 }
 
+// TestStatusline_PinnedPathSpawnsOnlyWhenStale pins the fix for the most
+// severe finding in the whole-branch review: on the errNoCachedStories path,
+// the PINNED statusline used to call spawnRefresh unconditionally,
+// discarding the needRefresh value pickStatusline had already computed. A
+// pool whose cache read cleanly, is fresh, and simply holds zero stories —
+// the ordinary state after a following pool's feeds all legitimately return
+// an empty document — would then fork a detached process on every prompt,
+// forever. TestStatusline_EmptyFollowingCacheIsNotStale already pins the
+// unpinned path (statusline.go:116-118, which read needRefresh correctly all
+// along); this is the companion for the pinned path (statusline.go's
+// errNoCachedStories case), which is where the bug lived.
+//
+// The config enables only the following pool ("a config enabling only the
+// feed pool" from the review), so the following cache is the sole active
+// pool and its presence/freshness/emptiness fully controls needRefresh.
+func TestStatusline_PinnedPathSpawnsOnlyWhenStale(t *testing.T) {
+	cases := []struct {
+		name       string
+		seedCache  bool
+		age        time.Duration
+		wantSpawns int
+	}{
+		{"present, fresh, empty: no spawn (R-36)", true, 1 * time.Minute, 0},
+		{"present, stale, empty: spawns once", true, 90 * time.Minute, 1},
+		{"absent: spawns once", false, 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, configDir := isolateXDG(t)
+			writeUserConfig(t, configDir, "pools = [\"following\"]\n\n[[following.feeds]]\nurl = \""+testFeedURL+"\"\n")
+			spawned := countSpawnRefresh(t)
+			now := time.Now().UTC()
+			if tc.seedCache {
+				// No titles: a cache file that read cleanly and holds zero
+				// stories — exactly what every feed returning a valid but
+				// item-less document leaves behind.
+				seedFollowingPool(t, now.Add(-tc.age))
+			}
+
+			out := runStatuslineArgs(t, 1, "--style=statusline", "--pin=prompt-1")
+			if out != "" {
+				t.Errorf("output = %q, want empty: no active pool has anything to select from", out)
+			}
+			if *spawned != tc.wantSpawns {
+				t.Errorf("spawnRefresh called %d times, want %d", *spawned, tc.wantSpawns)
+			}
+		})
+	}
+}
+
 // testFeedURL is the single feed enableFollowing configures and
 // seedFollowingPool attributes its stories to. They must agree: the cadence
 // weight is looked up by Story.Feed, so a mismatch would silently drop the

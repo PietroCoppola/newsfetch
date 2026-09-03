@@ -75,10 +75,14 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 				// runs it, and so never reads seen.json at all.
 				seen := loadSeen(cfg, now, errOut)
 				s, needRefresh, err := pickStatusline(cfg, seen, now, rng, errOut)
+				// Captured before the error check: errNoCachedStories carries
+				// a real needRefresh value too (a present, fresh, empty pool
+				// answers false; a missing or stale one answers true), and the
+				// caller below must see it on that path, not just on success.
+				stale = needRefresh
 				if err != nil {
 					return session.Entry{}, err
 				}
-				stale = needRefresh
 				// The entry carries the story's author and CreatedAt so
 				// later renders of the same pin reproduce this render's
 				// metadata tail exactly.
@@ -98,8 +102,13 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 				return nil
 			case errors.Is(err, errNoCachedStories):
 				// Empty output beats a "no fresh news" line: in a status
-				// row, silence is less noisy than an error banner.
-				spawnRefresh()
+				// row, silence is less noisy than an error banner. The
+				// spawn itself is gated on stale, not unconditional: a
+				// pool that is present, fresh, and simply empty must not
+				// fork a refresh on every prompt, forever (R-36).
+				if stale {
+					spawnRefresh()
+				}
 				return nil
 			default:
 				fmt.Fprintln(errOut, "newsfetch: warning: session pin:", err)
