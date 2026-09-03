@@ -202,6 +202,16 @@ func settingsAnswers(cfg config.Config) onboard.Answers {
 		// / "weight = -1.0". NaN is deliberately left "set" (not caught by
 		// > 0, so carved back in) so it still reaches tomlFloat's own
 		// non-finite guard rather than being silently reclassified here.
+		//
+		// The two knobs are guarded identically here but do not resolve
+		// identically once omitted: for weight, "unset" and what
+		// config.Validate would have clamped an explicit 0 to (see
+		// clampFeedWeight) are the same value, 0, so nothing is lost. For
+		// max_items they are not — Validate clamps an explicit 0 up to
+		// MinFeedItems (1), but omitting the key here makes the rewritten
+		// file's reload see it as genuinely unset, which resolves to the
+		// documented default of 3 (defaults.DefaultFeedMaxItems) instead.
+		// Accepted behaviour, not a bug: it just is not uniform.
 		if f.MaxItems > 0 {
 			n := f.MaxItems
 			of.MaxItems = &n

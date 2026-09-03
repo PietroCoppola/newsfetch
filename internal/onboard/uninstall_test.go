@@ -360,12 +360,16 @@ func TestUninstallFlow_PathErrorPropagates(t *testing.T) {
 // observe removal order without touching production code. It removes one
 // file from each of two throwaway directories, back to back with no delay,
 // and reports whether the directories' resulting mtimes come out strictly
-// ordered. A single trial can tie by bad luck even on a filesystem that
-// normally resolves finely, so a handful of independent trials are tried
-// before concluding the filesystem cannot do it; a coarse, tick-driven
-// clock (common on ubuntu-latest, where this suite runs in CI) ties on
-// every trial, while a fine one (darwin/APFS, this project's development
-// platform) reliably distinguishes the pair.
+// ordered. This is repeated across several independent trials, and EVERY
+// trial must separate before the filesystem is declared observable: the
+// real assertion downstream gets only a single attempt, so a lenient
+// any-trial-separates probe would let a borderline-precision filesystem —
+// one that separates most of the time but occasionally ties — pass here and
+// then genuinely tie on the one attempt that counts, turning the exact
+// flakiness this probe exists to prevent into a test failure instead of a
+// skip. A coarse, tick-driven clock (common on ubuntu-latest, where this
+// suite runs in CI) ties on every trial, while a fine one (darwin/APFS,
+// this project's development platform) reliably distinguishes every pair.
 func canObserveUnlinkOrder(t *testing.T) bool {
 	t.Helper()
 	const trials = 5
@@ -399,11 +403,11 @@ func canObserveUnlinkOrder(t *testing.T) bool {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s1.ModTime().Before(s2.ModTime()) {
-			return true
+		if !s1.ModTime().Before(s2.ModTime()) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // TestUninstallFlow_DataRemovedBeforeLock pins the ordering inside

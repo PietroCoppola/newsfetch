@@ -60,7 +60,7 @@ func writeConfigBytes(path string, answers Answers) error {
 // renderConfigTOML produces the TOML body. Kept separate from WriteConfig
 // for golden-style testing.
 //
-// ORDERING IS LOad-BEARING. This is line-oriented string building, not a
+// ORDERING IS LOAD-BEARING. This is line-oriented string building, not a
 // TOML marshaller, so it has no notion of "which table am I in". Once a
 // [table] header has been written, every subsequent key belongs to that
 // table: a `count = 1` emitted after `[news]` becomes news.count, which the

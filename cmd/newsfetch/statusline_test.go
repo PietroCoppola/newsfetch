@@ -830,15 +830,17 @@ func TestStatusline_LastResortHonoursReversedPoolOrder(t *testing.T) {
 		t.Fatalf("cfg.Pools = %q, want %q: pools and pool_order must disagree for this test to discriminate", got, want)
 	}
 	seen := loadSeen(cfg, now, io.Discard)
-	pools, rendered, err := assemblePools(cfg, seen, now, rand.New(rand.NewSource(1)), io.Discard)
+	pools, _, err := assemblePools(cfg, seen, now, rand.New(rand.NewSource(1)), io.Discard)
 	if err != nil {
 		t.Fatalf("assemblePools: %v", err)
 	}
 	var boxPool string
+	poolsWithStories := 0
 	for _, p := range pools {
 		if len(p.Stories) > 0 {
+			poolsWithStories++
 			if boxPool != "" {
-				t.Fatalf("assemblePools repeated %d pools, want exactly 1: the last resort spends the bypass on one pool only", len(rendered))
+				t.Fatalf("assemblePools filled %d pools with stories, want exactly 1: the last resort spends the bypass on one pool only", poolsWithStories)
 			}
 			boxPool = p.Name
 		}

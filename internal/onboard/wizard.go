@@ -600,8 +600,13 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 	}
 
 	// Only rewrite the order when there is an order to write. With one pool
-	// the user's previous ordering is left alone so it survives a disable /
-	// re-enable cycle, the same persist-don't-clear rule the feeds follow.
+	// the user's previous ordering is left alone in a.PoolOrder, the same
+	// persist-don't-clear rule the feeds follow — but that only survives a
+	// disable/re-enable within THIS run. The writer omits pool_order from
+	// disk whenever fewer than two pools are enabled (config_write.go), so
+	// a specific order set before disabling down to one pool is not there
+	// to reload in a later, separate --settings invocation; re-enabling the
+	// second pool then falls back to the compile-time default order.
 	if len(a.Pools) >= 2 {
 		a.PoolOrder = orderWithFirst(first, a.Pools)
 	}

@@ -90,6 +90,11 @@ func ReadInitJSON(r io.Reader) (Answers, error) {
 		}
 		a.Pools = *raw.Pools
 	}
+	// Must run AFTER the a.Pools block above, not before: validatePoolOrder
+	// checks each entry against a.Pools, and json.Decoder has already
+	// populated the whole raw struct by the time either block runs, so the
+	// order of keys in the input JSON has no bearing on the outcome — only
+	// the order of these two blocks in the source does.
 	if raw.PoolOrder != nil {
 		if err := validatePoolOrder("--init", *raw.PoolOrder, a.Pools); err != nil {
 			return Answers{}, err
