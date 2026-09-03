@@ -127,7 +127,13 @@ func runStatusline(out, errOut io.Writer, cfg config.Config, cli cliOverrides, r
 		}
 		return nil
 	case errors.Is(err, errNoCachedStories):
-		spawnRefresh()
+		// Empty output beats a "no fresh news" line, exactly as on the
+		// pinned path above. Gated on needRefresh, not unconditional: a
+		// pool that is present, fresh, and simply empty must not fork a
+		// refresh on every prompt, forever (R-36).
+		if needRefresh {
+			spawnRefresh()
+		}
 		return nil
 	case errors.Is(err, errNoStorySelected):
 		// A non-empty cache that yielded nothing is not worth a warning:
