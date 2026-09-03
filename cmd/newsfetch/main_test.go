@@ -1093,6 +1093,9 @@ count = 2
 following_count = 1
 ticker_marker = "dot"
 ticker_boxed = false
+cache_ttl_minutes = 45
+min_points = 10
+dedup_ttl_hours = 3
 
 [news]
 aggregators = ["hackernews"]
@@ -1309,6 +1312,9 @@ count = 1
 following_count = 1
 ticker_marker = "dot"
 ticker_boxed = false
+cache_ttl_minutes = 30
+min_points = 50
+dedup_ttl_hours = 6
 
 [news]
 aggregators = ["hackernews"]

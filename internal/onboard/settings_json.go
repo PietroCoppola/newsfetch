@@ -12,6 +12,7 @@ import (
 //	{ "topics": ["rust"], "style": "boxed", "pools": ["news", "following"],
 //	  "pool_order": ["following", "news"], "count": 3, "following_count": 1,
 //	  "ticker_marker": "branch", "ticker_boxed": true,
+//	  "cache_ttl_minutes": 45, "min_points": 10, "dedup_ttl_hours": 3,
 //	  "news": {"aggregators": ["hackernews"]},
 //	  "following": {"feeds": [{"url": "https://example.com/feed.xml"}]} }
 //
@@ -21,13 +22,17 @@ import (
 //
 // Everything else is OPTIONAL and inherits from current when omitted:
 // pool_order, following_count, news.aggregators, following.feeds,
-// ticker_marker, and ticker_boxed. That is persist-don't-clear, and here it
-// is a data-safety rule rather than a convenience — the Answers this
-// function returns are written over the user's ENTIRE config file, so a
-// field that does not survive an omission is a field deleted from disk. The
-// per-feed max_items and weight knobs are the sharpest case: the wizard
-// never surfaces them, so an omitted following.feeds must hand back
-// current's feeds with their pointers untouched.
+// ticker_marker, ticker_boxed, cache_ttl_minutes, min_points, and
+// dedup_ttl_hours. That is persist-don't-clear, and here it is a
+// data-safety rule rather than a convenience — the Answers this function
+// returns are written over the user's ENTIRE config file, so a field that
+// does not survive an omission is a field deleted from disk. The per-feed
+// max_items and weight knobs are the sharpest case: the wizard never
+// surfaces them, so an omitted following.feeds must hand back current's
+// feeds with their pointers untouched. cache_ttl_minutes, min_points, and
+// dedup_ttl_hours are never surfaced by either wizard at all, so the same
+// rule applies to all three: an omission is not a request to revert to the
+// compile-time default, it means the caller did not touch the field.
 //
 // An explicitly empty array is not an omission: "feeds": [] clears every
 // feed, which is the only way a scripted caller can unsubscribe from
@@ -44,16 +49,19 @@ import (
 // this reader deliberately does not.
 func ReadSettingsJSON(r io.Reader, current Answers) (Answers, error) {
 	var raw struct {
-		Topics         *[]string      `json:"topics"`
-		Style          *string        `json:"style"`
-		Pools          *[]string      `json:"pools"`
-		PoolOrder      *[]string      `json:"pool_order"`
-		Count          *int           `json:"count"`
-		FollowingCount *int           `json:"following_count"`
-		TickerMarker   *string        `json:"ticker_marker"`
-		TickerBoxed    *bool          `json:"ticker_boxed"`
-		News           *newsJSON      `json:"news"`
-		Following      *followingJSON `json:"following"`
+		Topics          *[]string      `json:"topics"`
+		Style           *string        `json:"style"`
+		Pools           *[]string      `json:"pools"`
+		PoolOrder       *[]string      `json:"pool_order"`
+		Count           *int           `json:"count"`
+		FollowingCount  *int           `json:"following_count"`
+		TickerMarker    *string        `json:"ticker_marker"`
+		TickerBoxed     *bool          `json:"ticker_boxed"`
+		CacheTTLMinutes *int           `json:"cache_ttl_minutes"`
+		MinPoints       *int           `json:"min_points"`
+		DedupTTLHours   *int           `json:"dedup_ttl_hours"`
+		News            *newsJSON      `json:"news"`
+		Following       *followingJSON `json:"following"`
 	}
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -92,6 +100,9 @@ func ReadSettingsJSON(r io.Reader, current Answers) (Answers, error) {
 		Feeds:           current.Feeds,
 		TickerMarker:    current.TickerMarker,
 		TickerBoxed:     current.TickerBoxed,
+		CacheTTLMinutes: current.CacheTTLMinutes,
+		MinPoints:       current.MinPoints,
+		DedupTTLHours:   current.DedupTTLHours,
 	}
 	// pool_order is validated only when the caller supplied it. An inherited
 	// order was already valid when it was written, and config.Validate
@@ -118,6 +129,17 @@ func ReadSettingsJSON(r io.Reader, current Answers) (Answers, error) {
 	}
 	if raw.TickerBoxed != nil {
 		a.TickerBoxed = *raw.TickerBoxed
+	}
+	// No range validation here — see ReadInitJSON's identical note by its
+	// own cache_ttl_minutes/min_points/dedup_ttl_hours block.
+	if raw.CacheTTLMinutes != nil {
+		a.CacheTTLMinutes = *raw.CacheTTLMinutes
+	}
+	if raw.MinPoints != nil {
+		a.MinPoints = *raw.MinPoints
+	}
+	if raw.DedupTTLHours != nil {
+		a.DedupTTLHours = *raw.DedupTTLHours
 	}
 	if raw.News != nil && raw.News.Aggregators != nil {
 		if err := validateSources("--settings", *raw.News.Aggregators); err != nil {

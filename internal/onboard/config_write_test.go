@@ -217,6 +217,9 @@ func TestRenderConfigTOML_Goldens(t *testing.T) {
 				FollowingCount:  1,
 				TickerMarker:    "dot",
 				TickerBoxed:     false,
+				CacheTTLMinutes: 30,
+				MinPoints:       50,
+				DedupTTLHours:   6,
 			},
 			want: `# newsfetch config. Edit freely; see spec.md for field meanings.
 
@@ -227,6 +230,9 @@ count = 1
 following_count = 1
 ticker_marker = "dot"
 ticker_boxed = false
+cache_ttl_minutes = 30
+min_points = 50
+dedup_ttl_hours = 6
 
 [news]
 aggregators = ["hackernews"]
@@ -245,6 +251,9 @@ aggregators = ["hackernews"]
 				Feeds:           []Feed{{URL: "https://drewdevault.com/blog/index.xml"}},
 				TickerMarker:    "branch",
 				TickerBoxed:     true,
+				CacheTTLMinutes: 30,
+				MinPoints:       50,
+				DedupTTLHours:   6,
 			},
 			want: `# newsfetch config. Edit freely; see spec.md for field meanings.
 
@@ -256,6 +265,9 @@ count = 2
 following_count = 1
 ticker_marker = "branch"
 ticker_boxed = true
+cache_ttl_minutes = 30
+min_points = 50
+dedup_ttl_hours = 6
 
 [news]
 aggregators = ["hackernews"]
@@ -277,8 +289,11 @@ url = "https://drewdevault.com/blog/index.xml"
 					MaxItems: intPtr(2),
 					Weight:   floatPtr(0.3),
 				}},
-				TickerMarker: "dot",
-				TickerBoxed:  false,
+				TickerMarker:    "dot",
+				TickerBoxed:     false,
+				CacheTTLMinutes: 45,
+				MinPoints:       10,
+				DedupTTLHours:   3,
 			},
 			want: `# newsfetch config. Edit freely; see spec.md for field meanings.
 
@@ -289,6 +304,9 @@ count = 1
 following_count = 3
 ticker_marker = "dot"
 ticker_boxed = false
+cache_ttl_minutes = 45
+min_points = 10
+dedup_ttl_hours = 3
 
 [[following.feeds]]
 url = "https://blog.cloudflare.com/rss/"
@@ -393,8 +411,11 @@ func TestWriteConfig_PoolFieldsRoundTripThroughLoadAndValidate(t *testing.T) {
 			{URL: "https://drewdevault.com/blog/index.xml"},
 			{URL: "https://blog.cloudflare.com/rss/", MaxItems: intPtr(2), Weight: floatPtr(0.3)},
 		},
-		TickerMarker: "branch",
-		TickerBoxed:  true,
+		TickerMarker:    "branch",
+		TickerBoxed:     true,
+		CacheTTLMinutes: 30,
+		MinPoints:       50,
+		DedupTTLHours:   6,
 	}
 	if err := WriteConfig(path, answers); err != nil {
 		t.Fatalf("WriteConfig: %v", err)
@@ -448,7 +469,10 @@ func TestWriteConfig_DisabledFollowingStillPersistsFeeds(t *testing.T) {
 		Feeds: []Feed{
 			{URL: "https://blog.cloudflare.com/rss/", MaxItems: intPtr(2), Weight: floatPtr(0.3)},
 		},
-		TickerMarker: "dot",
+		TickerMarker:    "dot",
+		CacheTTLMinutes: 30,
+		MinPoints:       50,
+		DedupTTLHours:   6,
 	}
 	if err := WriteConfig(path, answers); err != nil {
 		t.Fatalf("WriteConfig: %v", err)

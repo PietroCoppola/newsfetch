@@ -233,6 +233,9 @@ func settingsAnswers(cfg config.Config) onboard.Answers {
 		Feeds:           feeds,
 		TickerMarker:    cfg.TickerMarker,
 		TickerBoxed:     cfg.TickerBoxed,
+		CacheTTLMinutes: int(cfg.CacheTTL / time.Minute),
+		MinPoints:       cfg.MinPoints,
+		DedupTTLHours:   int(cfg.DedupWindow / time.Hour),
 	}
 }
 

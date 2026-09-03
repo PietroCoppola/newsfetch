@@ -32,6 +32,12 @@ var curr = Answers{
 	},
 	TickerMarker: "branch",
 	TickerBoxed:  true,
+	// Deliberately distinct from both the compile-time defaults (30/50/6)
+	// and from any value a test below sends in a payload, so a test that
+	// finds these numbers can only have gotten them from curr.
+	CacheTTLMinutes: 45,
+	MinPoints:       10,
+	DedupTTLHours:   3,
 }
 
 func TestReadSettingsJSON_Valid(t *testing.T) {
@@ -44,6 +50,9 @@ func TestReadSettingsJSON_Valid(t *testing.T) {
 		"following_count": 1,
 		"ticker_marker": "arrow",
 		"ticker_boxed": false,
+		"cache_ttl_minutes": 20,
+		"min_points": 5,
+		"dedup_ttl_hours": 12,
 		"news": {"aggregators": ["hackernews", "lobsters"]},
 		"following": {"feeds": [{"url": "https://example.com/feed.xml", "max_items": 4}]}
 	}`), curr)
@@ -62,9 +71,41 @@ func TestReadSettingsJSON_Valid(t *testing.T) {
 		Feeds:           []Feed{{URL: "https://example.com/feed.xml", MaxItems: &four}},
 		TickerMarker:    "arrow",
 		TickerBoxed:     false,
+		// Distinct from both curr's values (45/10/3) and the compile-time
+		// defaults (30/50/6): only a payload override could have produced
+		// these.
+		CacheTTLMinutes: 20,
+		MinPoints:       5,
+		DedupTTLHours:   12,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestReadSettingsJSON_CacheDedupMinPointsInheritCurrentWhenOmitted pins the
+// fix for the review finding that --settings silently reverted
+// cache_ttl_minutes, min_points, and dedup_ttl_hours to their compile-time
+// defaults on every save. An omitted key must inherit the caller's current
+// configuration, exactly like following_count/ticker_marker/ticker_boxed
+// already do — never fall back to defaults.CacheTTL/MinPoints/DedupWindow,
+// which would silently discard a user's tuning the first time they ran
+// --settings for something unrelated.
+func TestReadSettingsJSON_CacheDedupMinPointsInheritCurrentWhenOmitted(t *testing.T) {
+	got, err := ReadSettingsJSON(strings.NewReader(
+		`{"topics":[],"style":"minimal","pools":["news","following"],"count":1}`,
+	), curr)
+	if err != nil {
+		t.Fatalf("ReadSettingsJSON: %v", err)
+	}
+	if got.CacheTTLMinutes != curr.CacheTTLMinutes {
+		t.Errorf("CacheTTLMinutes = %d, want %d (preserved from current)", got.CacheTTLMinutes, curr.CacheTTLMinutes)
+	}
+	if got.MinPoints != curr.MinPoints {
+		t.Errorf("MinPoints = %d, want %d (preserved from current)", got.MinPoints, curr.MinPoints)
+	}
+	if got.DedupTTLHours != curr.DedupTTLHours {
+		t.Errorf("DedupTTLHours = %d, want %d (preserved from current)", got.DedupTTLHours, curr.DedupTTLHours)
 	}
 }
 
@@ -371,7 +412,7 @@ func TestReadSettingsJSON_UnknownFieldRejectedInNestedObjects(t *testing.T) {
 		name string
 		body string
 	}{
-		{"top level", `{"topics":[],"style":"boxed","pools":["news"],"count":1,"cache_ttl_minutes":10}`},
+		{"top level", `{"topics":[],"style":"boxed","pools":["news"],"count":1,"refresh_interval":10}`},
 		{"inside news", `{"topics":[],"style":"boxed","pools":["news"],"count":1,"news":{"aggregators":["hackernews"],"bogus":1}}`},
 		{"inside following", `{"topics":[],"style":"boxed","pools":["news"],"count":1,"following":{"feeds":[],"bogus":1}}`},
 		{"inside a feed", `{"topics":[],"style":"boxed","pools":["news"],"count":1,"following":{"feeds":[{"url":"https://a.example/f","bogus":1}]}}`},

@@ -25,8 +25,9 @@ var ErrConfigExists = errors.New("config file already exists")
 // emitted iff the corresponding Answers field is non-nil — leaving them nil
 // makes future default changes flow through to the user without requiring
 // them to re-edit the file. Feed blocks are emitted whenever Answers.Feeds
-// is non-empty, enabled pool or not. cache_ttl_minutes and min_points are
-// never emitted (same reason).
+// is non-empty, enabled pool or not. cache_ttl_minutes, min_points, and
+// dedup_ttl_hours are emitted unconditionally, the same as count and the
+// ticker fields below — see renderConfigTOML's doc comment.
 func WriteConfig(path string, answers Answers) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%w: %s", ErrConfigExists, path)
@@ -68,11 +69,14 @@ func writeConfigBytes(path string, answers Answers) error {
 // top-level scalars are therefore written first, then [news], then the
 // [[following.feeds]] array of tables. Do not move a scalar below a header.
 //
-// count, following_count, ticker_marker, and ticker_boxed are emitted
-// unconditionally (even when currently inert because style != "boxed", the
-// counts are 1, or the following pool is disabled) so a user's prior tuning
-// survives a temporary switch away. This mirrors the wizard's
-// hide-don't-clear behaviour for the same fields.
+// count, following_count, ticker_marker, ticker_boxed, cache_ttl_minutes,
+// min_points, and dedup_ttl_hours are emitted unconditionally (even when
+// currently inert because style != "boxed", the counts are 1, or the
+// following pool is disabled) so a user's prior tuning survives a temporary
+// switch away. This mirrors the wizard's hide-don't-clear behaviour for the
+// same fields. The last three are never surfaced by either wizard at all —
+// same as a feed's max_items/weight — so "hide-don't-clear" there means
+// simply never touching the value between load and rewrite.
 //
 // pools, pool_order, and the [news] table follow the nil-means-omit
 // convention: a nil slice leaves the key out of the file so a future change
@@ -98,6 +102,11 @@ func renderConfigTOML(a Answers) string {
 	fmt.Fprintf(&b, "following_count = %d\n", a.FollowingCount)
 	fmt.Fprintf(&b, "ticker_marker = %q\n", a.TickerMarker)
 	fmt.Fprintf(&b, "ticker_boxed = %t\n", a.TickerBoxed)
+	// Written as minutes / a plain count / hours — matching how config.Load
+	// parses them — not as Go durations.
+	fmt.Fprintf(&b, "cache_ttl_minutes = %d\n", a.CacheTTLMinutes)
+	fmt.Fprintf(&b, "min_points = %d\n", a.MinPoints)
+	fmt.Fprintf(&b, "dedup_ttl_hours = %d\n", a.DedupTTLHours)
 	// Everything below this line is inside a table. No top-level scalars.
 	if a.NewsAggregators != nil {
 		b.WriteString("\n[news]\n")

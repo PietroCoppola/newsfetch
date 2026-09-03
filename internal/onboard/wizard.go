@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
@@ -329,13 +330,24 @@ type Feed struct {
 // the entire config file from this struct, so a feed that does not survive
 // the trip from config.Load to here is a feed erased from the user's disk.
 //
-// Count, FollowingCount, TickerMarker, and TickerBoxed are persisted
-// unconditionally even when currently inert (e.g. TickerMarker survives a
-// switch from style=boxed to style=minimal, FollowingCount survives
-// disabling the following pool). The choice is deliberate: a user who
-// previously tuned a render expects to find that tuning preserved when they
-// switch back, rather than having to re-pick from defaults. The settings
-// wizard mirrors this by hiding inert fields rather than clearing them.
+// Count, FollowingCount, TickerMarker, TickerBoxed, CacheTTLMinutes,
+// MinPoints, and DedupTTLHours are persisted unconditionally even when
+// currently inert (e.g. TickerMarker survives a switch from style=boxed to
+// style=minimal, FollowingCount survives disabling the following pool). The
+// choice is deliberate: a user who previously tuned a render expects to
+// find that tuning preserved when they switch back, rather than having to
+// re-pick from defaults. The settings wizard mirrors this by hiding inert
+// fields rather than clearing them.
+//
+// CacheTTLMinutes, MinPoints, and DedupTTLHours are TOML/JSON-only advanced
+// settings, same as a feed's MaxItems/Weight: neither wizard surfaces them,
+// so both must carry an existing value through untouched rather than
+// inventing one. They are plain ints, not pointers, because every value in
+// their range (including 0, which is meaningful for MinPoints and
+// DedupTTLHours) is a value a producer might legitimately hold — the
+// producers (defaultInitAnswers, settingsAnswers, the JSON readers) are
+// responsible for always supplying one, the same contract Count already
+// has.
 type Answers struct {
 	Topics          []string
 	Style           string
@@ -347,6 +359,9 @@ type Answers struct {
 	Feeds           []Feed
 	TickerMarker    string
 	TickerBoxed     bool
+	CacheTTLMinutes int // cache_ttl_minutes; stale-while-revalidate window, in minutes
+	MinPoints       int // min_points; source-advisory floor on candidate points
+	DedupTTLHours   int // dedup_ttl_hours; 0 disables the dedup time gate
 }
 
 // RunInitWizard drives the interactive --init UI: a topic multi-select
@@ -405,12 +420,15 @@ func initFields(a *Answers) []huh.Field {
 // user without them re-running --settings.
 func defaultInitAnswers() Answers {
 	return Answers{
-		Style:          defaults.Style,
-		Pools:          defaults.Pools(),
-		Count:          defaults.Count,
-		FollowingCount: defaults.FollowingCount,
-		TickerMarker:   defaults.TickerMarker,
-		TickerBoxed:    defaults.TickerBoxed,
+		Style:           defaults.Style,
+		Pools:           defaults.Pools(),
+		Count:           defaults.Count,
+		FollowingCount:  defaults.FollowingCount,
+		TickerMarker:    defaults.TickerMarker,
+		TickerBoxed:     defaults.TickerBoxed,
+		CacheTTLMinutes: int(defaults.CacheTTL / time.Minute),
+		MinPoints:       defaults.MinPoints,
+		DedupTTLHours:   int(defaults.DedupWindow / time.Hour),
 	}
 }
 
@@ -452,6 +470,9 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 		Feeds:           append([]Feed(nil), current.Feeds...),
 		TickerMarker:    current.TickerMarker,
 		TickerBoxed:     current.TickerBoxed,
+		CacheTTLMinutes: current.CacheTTLMinutes,
+		MinPoints:       current.MinPoints,
+		DedupTTLHours:   current.DedupTTLHours,
 	}
 	if len(a.Pools) == 0 {
 		a.Pools = defaults.Pools()

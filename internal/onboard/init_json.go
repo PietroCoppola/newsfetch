@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
@@ -23,6 +24,7 @@ import (
 //	  "pools": ["news", "following"], "pool_order": ["following", "news"],
 //	  "count": 2, "following_count": 1,
 //	  "ticker_marker": "branch", "ticker_boxed": true,
+//	  "cache_ttl_minutes": 45, "min_points": 10, "dedup_ttl_hours": 3,
 //	  "news": {"aggregators": ["hackernews", "lobsters"]},
 //	  "following": {"feeds": [
 //	    {"url": "https://drewdevault.com/blog/index.xml"},
@@ -38,8 +40,12 @@ import (
 // present the values are validated; when absent they take the compile-time
 // defaults, except news.aggregators, following.feeds and pool_order, which
 // stay nil so the config writer omits them entirely (future default changes
-// then flow through to the user). Unknown JSON fields are rejected at every
-// nesting depth.
+// then flow through to the user). cache_ttl_minutes, min_points, and
+// dedup_ttl_hours follow the same "absent takes the compile-time default"
+// rule as count and following_count — see settings_json.go's ReadSettingsJSON
+// for the sibling behaviour on --settings, where an absent value inherits
+// the CALLER's current configuration instead. Unknown JSON fields are
+// rejected at every nesting depth.
 //
 // There is NO "sources" key and no alias for one (ruling R-4).
 // DisallowUnknownFields rejects it by name, which is the entire migration
@@ -50,16 +56,19 @@ import (
 // only protect scripts that do not exist. Do not "fix" the inconsistency.
 func ReadInitJSON(r io.Reader) (Answers, error) {
 	var raw struct {
-		Topics         *[]string      `json:"topics"`
-		Style          *string        `json:"style"`
-		Pools          *[]string      `json:"pools"`
-		PoolOrder      *[]string      `json:"pool_order"`
-		Count          *int           `json:"count"`
-		FollowingCount *int           `json:"following_count"`
-		TickerMarker   *string        `json:"ticker_marker"`
-		TickerBoxed    *bool          `json:"ticker_boxed"`
-		News           *newsJSON      `json:"news"`
-		Following      *followingJSON `json:"following"`
+		Topics          *[]string      `json:"topics"`
+		Style           *string        `json:"style"`
+		Pools           *[]string      `json:"pools"`
+		PoolOrder       *[]string      `json:"pool_order"`
+		Count           *int           `json:"count"`
+		FollowingCount  *int           `json:"following_count"`
+		TickerMarker    *string        `json:"ticker_marker"`
+		TickerBoxed     *bool          `json:"ticker_boxed"`
+		CacheTTLMinutes *int           `json:"cache_ttl_minutes"`
+		MinPoints       *int           `json:"min_points"`
+		DedupTTLHours   *int           `json:"dedup_ttl_hours"`
+		News            *newsJSON      `json:"news"`
+		Following       *followingJSON `json:"following"`
 	}
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -76,13 +85,16 @@ func ReadInitJSON(r io.Reader) (Answers, error) {
 		return Answers{}, err
 	}
 	a := Answers{
-		Topics:         *raw.Topics,
-		Style:          *raw.Style,
-		Pools:          defaults.Pools(),
-		Count:          defaults.Count,
-		FollowingCount: defaults.FollowingCount,
-		TickerMarker:   defaults.TickerMarker,
-		TickerBoxed:    defaults.TickerBoxed,
+		Topics:          *raw.Topics,
+		Style:           *raw.Style,
+		Pools:           defaults.Pools(),
+		Count:           defaults.Count,
+		FollowingCount:  defaults.FollowingCount,
+		TickerMarker:    defaults.TickerMarker,
+		TickerBoxed:     defaults.TickerBoxed,
+		CacheTTLMinutes: int(defaults.CacheTTL / time.Minute),
+		MinPoints:       defaults.MinPoints,
+		DedupTTLHours:   int(defaults.DedupWindow / time.Hour),
 	}
 	if raw.Pools != nil {
 		if err := validatePools("--init", *raw.Pools); err != nil {
@@ -121,6 +133,22 @@ func ReadInitJSON(r io.Reader) (Answers, error) {
 	}
 	if raw.TickerBoxed != nil {
 		a.TickerBoxed = *raw.TickerBoxed
+	}
+	// No range validation here: cache_ttl_minutes, min_points, and
+	// dedup_ttl_hours have no exported floor to check against (config.Validate
+	// owns minCacheTTL privately), and a hand-edited config.toml already
+	// reaches disk with unvalidated values for these three today — Validate
+	// clamps and warns at the next render either way. Carrying the raw int
+	// through here keeps that one behaviour rather than inventing a second,
+	// JSON-only floor that could drift from config.Validate's.
+	if raw.CacheTTLMinutes != nil {
+		a.CacheTTLMinutes = *raw.CacheTTLMinutes
+	}
+	if raw.MinPoints != nil {
+		a.MinPoints = *raw.MinPoints
+	}
+	if raw.DedupTTLHours != nil {
+		a.DedupTTLHours = *raw.DedupTTLHours
 	}
 	if raw.News != nil && raw.News.Aggregators != nil {
 		if err := validateSources("--init", *raw.News.Aggregators); err != nil {

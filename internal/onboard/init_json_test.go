@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 )
@@ -17,13 +18,16 @@ func TestReadInitJSON_Valid(t *testing.T) {
 	// Omitted optional fields fall back to compile-time defaults;
 	// NewsAggregators and Feeds stay nil so the writer omits their tables.
 	want := Answers{
-		Topics:         []string{"rust", "ai"},
-		Style:          "boxed",
-		Pools:          defaults.Pools(),
-		Count:          defaults.Count,
-		FollowingCount: defaults.FollowingCount,
-		TickerMarker:   defaults.TickerMarker,
-		TickerBoxed:    defaults.TickerBoxed,
+		Topics:          []string{"rust", "ai"},
+		Style:           "boxed",
+		Pools:           defaults.Pools(),
+		Count:           defaults.Count,
+		FollowingCount:  defaults.FollowingCount,
+		TickerMarker:    defaults.TickerMarker,
+		TickerBoxed:     defaults.TickerBoxed,
+		CacheTTLMinutes: int(defaults.CacheTTL / time.Minute),
+		MinPoints:       defaults.MinPoints,
+		DedupTTLHours:   int(defaults.DedupWindow / time.Hour),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
@@ -49,6 +53,9 @@ func TestReadInitJSON_FullSchema(t *testing.T) {
 		"following_count": 3,
 		"ticker_marker": "branch",
 		"ticker_boxed": true,
+		"cache_ttl_minutes": 45,
+		"min_points": 10,
+		"dedup_ttl_hours": 3,
 		"news": {"aggregators": ["hackernews", "lobsters"]},
 		"following": {"feeds": [
 			{"url": "https://drewdevault.com/blog/index.xml"},
@@ -73,8 +80,11 @@ func TestReadInitJSON_FullSchema(t *testing.T) {
 			{URL: "https://drewdevault.com/blog/index.xml"},
 			{URL: "https://blog.cloudflare.com/rss/", MaxItems: &two, Weight: &tenth},
 		},
-		TickerMarker: "branch",
-		TickerBoxed:  true,
+		TickerMarker:    "branch",
+		TickerBoxed:     true,
+		CacheTTLMinutes: 45,
+		MinPoints:       10,
+		DedupTTLHours:   3,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
@@ -280,7 +290,7 @@ func TestReadInitJSON_UnknownFieldRejectedInNestedObjects(t *testing.T) {
 		name string
 		body string
 	}{
-		{"top level", `{"topics":[],"style":"boxed","cache_ttl_minutes":10}`},
+		{"top level", `{"topics":[],"style":"boxed","refresh_interval":10}`},
 		{"inside news", `{"topics":[],"style":"boxed","news":{"aggregators":["hackernews"],"bogus":1}}`},
 		{"inside following", `{"topics":[],"style":"boxed","following":{"feeds":[],"bogus":1}}`},
 		{"inside a feed", `{"topics":[],"style":"boxed","following":{"feeds":[{"url":"https://a.example/f","bogus":1}]}}`},
