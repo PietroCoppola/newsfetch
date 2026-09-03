@@ -338,29 +338,38 @@ func TestTickerGroupHidden(t *testing.T) {
 // each one was wrong in a different way.
 func TestRequirePoolContent(t *testing.T) {
 	cases := []struct {
-		name    string
-		pools   []string
-		pool    string
-		n       int
-		wantErr bool
-		wantSub string
+		name       string
+		pools      []string
+		pool       string
+		newsN      int
+		followingN int
+		wantErr    bool
+		wantSub    string
 	}{
-		{"news enabled and empty", []string{"news"}, "news", 0, true, "aggregator"},
-		{"news enabled with one", []string{"news"}, "news", 1, false, ""},
-		{"news disabled and empty", []string{"following"}, "news", 0, false, ""},
-		{"news disabled, no pools at all", nil, "news", 0, false, ""},
-		{"following enabled and empty", []string{"news", "following"}, "following", 0, true, "feed"},
-		{"following enabled with one", []string{"following"}, "following", 1, false, ""},
-		{"following disabled and empty", []string{"news"}, "following", 0, false, ""},
+		{"news enabled and empty", []string{"news"}, "news", 0, 0, true, "aggregator"},
+		{"news enabled with one", []string{"news"}, "news", 1, 0, false, ""},
+		{"news disabled and empty", []string{"following"}, "news", 0, 0, false, ""},
+		{"news disabled, no pools at all", nil, "news", 0, 0, false, ""},
+		{"following enabled and empty", []string{"news", "following"}, "following", 0, 0, true, "feed"},
+		{"following enabled with one", []string{"following"}, "following", 0, 1, false, ""},
+		{"following disabled and empty", []string{"news"}, "following", 0, 0, false, ""},
+		// The relaxed half of R-39 (this fix): the rule is "at least one
+		// enabled pool has content", not "every enabled pool has content".
+		// A user running both pools with one empty and the other full must
+		// be able to save — validating the news field must not block on
+		// news being empty when following already has feeds, and vice
+		// versa.
+		{"news empty but following has feeds", []string{"news", "following"}, "news", 0, 3, false, ""},
+		{"following empty but news has aggregators", []string{"news", "following"}, "following", 2, 0, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := requirePoolContent(tc.pools, tc.pool, tc.n)
+			err := requirePoolContent(tc.pools, tc.pool, tc.newsN, tc.followingN)
 			if tc.wantErr && err == nil {
-				t.Fatalf("requirePoolContent(%v, %q, %d) = nil, want an error", tc.pools, tc.pool, tc.n)
+				t.Fatalf("requirePoolContent(%v, %q, %d, %d) = nil, want an error", tc.pools, tc.pool, tc.newsN, tc.followingN)
 			}
 			if !tc.wantErr && err != nil {
-				t.Fatalf("requirePoolContent(%v, %q, %d) = %v, want nil", tc.pools, tc.pool, tc.n, err)
+				t.Fatalf("requirePoolContent(%v, %q, %d, %d) = %v, want nil", tc.pools, tc.pool, tc.newsN, tc.followingN, err)
 			}
 			if tc.wantErr && !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("error %q should name what is missing (%q)", err, tc.wantSub)

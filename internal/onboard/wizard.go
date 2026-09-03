@@ -272,31 +272,39 @@ func tickerGroupHidden(a Answers) bool {
 	return a.Style != "boxed" || n <= 1
 }
 
-// requirePoolContent reports the error an enabled pool must show when it
-// has nothing in it: no aggregators for news, no feeds for following. n is
-// how many entries that pool currently holds.
+// requirePoolContent reports the error to show when finishing the field for
+// pool right now would leave every enabled pool empty. newsN and followingN
+// are how many entries each pool currently holds.
 //
-// Returns nil when the pool is not in pools, and that is the whole point
-// (ruling R-39). A user who turns a pool off is not asked to populate it,
-// and a user who leaves one on does not get to finish with it empty. The
-// two pools share this helper so they cannot drift into different rules;
-// the form calls it from the aggregator field's validator and from the
-// add-feed loop's empty submission.
+// The rule is "at least one enabled pool has content", matching
+// config.Validate's anyPoolHasContent and both JSON readers'
+// validatePoolContent exactly — NOT "every enabled pool has content". A
+// user running both pools with one empty and the other full is a valid,
+// already-accepted configuration on every other surface; the wizard must
+// not be the one place that configuration cannot be saved. A disabled pool
+// never counts against the rule either way (ruling R-39): a user who turns
+// a pool off is not asked to populate it.
 //
-// This is the wizard's half of a rule the other two surfaces already
-// enforce their own way: config.Validate clamps an all-empty config back to
-// the defaults, and the JSON readers reject it outright. The wizard is the
-// one surface that can prevent the state from being created at all, so it
-// does.
-func requirePoolContent(pools []string, pool string, n int) error {
-	if !containsString(pools, pool) || n > 0 {
+// The two call sites — the aggregator field's validator and the add-feed
+// loop's empty submission — pass each other's count as of the point they
+// run. The add-feed loop runs last and sees a.NewsAggregators already
+// settled, so it is the authoritative final gate: if a user leaves news
+// empty because following had feeds, then goes on to remove every feed,
+// finishing the loop with nothing added is caught right there.
+func requirePoolContent(pools []string, pool string, newsN, followingN int) error {
+	newsHasContent := containsString(pools, "news") && newsN > 0
+	followingHasContent := containsString(pools, "following") && followingN > 0
+	if newsHasContent || followingHasContent {
+		return nil
+	}
+	if !containsString(pools, pool) {
 		return nil
 	}
 	switch pool {
 	case "news":
-		return errors.New("pick at least one aggregator, or go back and turn the News pool off")
+		return errors.New("pick at least one aggregator, add a Following feed, or turn the News pool off")
 	case "following":
-		return errors.New("add at least one feed, or turn the Following pool off")
+		return errors.New("add at least one feed, pick a News aggregator, or turn the Following pool off")
 	default:
 		return fmt.Errorf("the %s pool is enabled but empty", pool)
 	}
@@ -506,17 +514,18 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 		),
 		// Group 2: where the News pool fetches from. Its own group so it can
 		// be hidden — asking a user who just unchecked News to populate it
-		// is a question about a pool they turned off, and the old shape
-		// REQUIRED an answer, so an unchecked News pool could not be saved
-		// at all. Required only while News is enabled (R-39).
+		// is a question about a pool they turned off. Emptying it is only
+		// blocked when Following (as it stands right now, before its own
+		// remove/add stages run) would also be empty — the relaxed R-39: at
+		// least one enabled pool needs content, not every enabled pool.
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
 				Title("News aggregators").
-				Description("Where the News pool fetches from. At least one required.").
+				Description("Where the News pool fetches from. Leave empty if Following already has feeds.").
 				Filterable(false).
 				Options(sourceOptions()...).
 				Validate(func(v []string) error {
-					return requirePoolContent(a.Pools, "news", len(v))
+					return requirePoolContent(a.Pools, "news", len(v), len(a.Feeds))
 				}).
 				Value(&a.NewsAggregators),
 		).WithHideFunc(func() bool {
@@ -542,7 +551,7 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 	a.Feeds = removeFeeds(a.Feeds, removed)
 
 	if containsString(a.Pools, "following") {
-		feeds, err := runAddFeedLoop(a.Pools, a.Feeds)
+		feeds, err := runAddFeedLoop(a.Pools, a.Feeds, len(a.NewsAggregators))
 		if err != nil {
 			return Answers{}, err
 		}
@@ -645,18 +654,22 @@ func RunSettingsWizard(current Answers) (Answers, error) {
 // refresh time instead, where retrying costs nothing.
 //
 // The empty submission — the way OUT of the loop — is itself validated
-// through requirePoolContent, which is the Following pool's half of the
-// enabled-pools-must-have-content rule (R-39). This loop only runs when
-// Following is enabled, so finishing it with nothing subscribed would write
-// exactly the enabled-but-empty pool that config.Validate clamps and the
-// JSON readers reject. The description flips accordingly, so the first pass
-// says a feed is needed and every later pass says how to stop.
-func runAddFeedLoop(pools []string, feeds []Feed) ([]Feed, error) {
+// through requirePoolContent, the relaxed R-39 rule: at least one enabled
+// pool needs content, not every enabled pool. newsN is a.NewsAggregators'
+// length as Group 2 left it, already settled by the time this loop runs, so
+// this is the authoritative last check — finishing with Following empty is
+// only blocked when News is ALSO empty. This loop only runs when Following
+// is enabled, so a block here cannot be escaped by anything other than
+// adding a feed, picking a News aggregator (too late — go back), or turning
+// a pool off. The description reflects whichever is true for the current
+// pass: leaving empty finishes normally once either pool would end up with
+// content.
+func runAddFeedLoop(pools []string, feeds []Feed, newsN int) ([]Feed, error) {
 	for {
 		var raw string
 		desc := "RSS or Atom URL. Leave empty to finish."
-		if len(feeds) == 0 {
-			desc = "RSS or Atom URL. The Following pool is on, so at least one is required."
+		if requirePoolContent(pools, "following", newsN, len(feeds)) != nil {
+			desc = "RSS or Atom URL. Following is on and News has no aggregators, so at least one feed is required."
 		}
 		form := huh.NewForm(
 			huh.NewGroup(
@@ -666,7 +679,7 @@ func runAddFeedLoop(pools []string, feeds []Feed) ([]Feed, error) {
 					Placeholder("https://example.com/feed.xml").
 					Validate(func(s string) error {
 						if strings.TrimSpace(s) == "" {
-							return requirePoolContent(pools, "following", len(feeds))
+							return requirePoolContent(pools, "following", newsN, len(feeds))
 						}
 						return ValidateFeedURL(s)
 					}).
