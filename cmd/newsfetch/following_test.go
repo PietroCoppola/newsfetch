@@ -709,6 +709,17 @@ func TestRefreshFollowing_AllFeedsFailedWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read seeded cache: %v", err)
 	}
+	// Content equality is not the whole claim the name makes. The failure
+	// path prunes feeds the user unsubscribed from (see
+	// TestRefreshFollowing_TotalFailureStillDropsUnconfiguredFeeds), and
+	// here there are none to prune — so the file must not be REWRITTEN
+	// either, byte-identically or otherwise. cache.Write renames a temp
+	// file over the target, so an unwanted write moves ModTime even when
+	// every byte lands the same.
+	beforeStat, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatalf("stat seeded cache: %v", err)
+	}
 
 	cfg := config.Defaults()
 	cfg.Pools = []string{"news", "following"}
@@ -724,6 +735,13 @@ func TestRefreshFollowing_AllFeedsFailedWritesNothing(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Errorf("following.json was rewritten on a total failure:\nbefore: %s\nafter:  %s", before, after)
+	}
+	afterStat, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatalf("stat cache after refresh: %v", err)
+	}
+	if !afterStat.ModTime().Equal(beforeStat.ModTime()) {
+		t.Errorf("following.json ModTime moved from %s to %s: nothing was fetched and nothing was unsubscribed, so the failure path must not write at all", beforeStat.ModTime(), afterStat.ModTime())
 	}
 }
 
@@ -903,5 +921,55 @@ func TestRefreshFollowing_CacheAndFeedstateShareTimestamp(t *testing.T) {
 	}
 	if got := feedStateFor(t, state, feed).ObservedAt; !got.Equal(now) {
 		t.Errorf("feeds.json ObservedAt = %s, want %s — the cadence update must record the SAME now the cache write recorded, or freshness and cadence weighting can disagree about when this refresh happened", got, now)
+	}
+}
+
+// TestRefreshFollowing_TotalFailureStillDropsUnconfiguredFeeds separates the
+// two things the all-feeds-failed early return used to conflate. "Every
+// fetch failed" is a statement about CONTENT: a configured feed that could
+// not be reached keeps the stories it had, and the old FetchedAt stands so
+// the pool still reads stale and the next refresh retries. It says nothing
+// about CONFIGURATION: a feed the user unsubscribed from is gone whether or
+// not this pass reached the network, and the merge is the only place that
+// pruning happens.
+//
+// So a total failure must still drop the removed feed while keeping the
+// configured-but-failing one, and must not stamp a new FetchedAt for the
+// privilege.
+func TestRefreshFollowing_TotalFailureStillDropsUnconfiguredFeeds(t *testing.T) {
+	isolateXDG(t)
+
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	feed := srv.URL + "/feed.xml"
+	const removed = "https://removed.example.com/feed.xml"
+	stale := now.Add(-3 * time.Hour)
+	cachePath := seedFollowingCache(t, []fetch.Story{
+		storyFor(feed, "https://feed.example.com/kept"),
+		storyFor(removed, "https://removed.example.com/gone"),
+	}, stale)
+
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.Following = config.FollowingConfig{Feeds: []config.FeedConfig{{URL: feed}}}
+
+	if err := refreshFollowing(context.Background(), cfg, now); err == nil {
+		t.Fatal("refreshFollowing() = nil with every feed failing, want an error so runRefresh can count the pool as failed")
+	}
+
+	f, err := cache.Read(cachePath)
+	if err != nil {
+		t.Fatalf("read following.json: %v", err)
+	}
+	want := []string{"https://feed.example.com/kept"}
+	if got := storyURLs(f.Stories); !slices.Equal(got, want) {
+		t.Errorf("following.json stories = %v, want %v — a failed fetch keeps a configured feed's stories, but an unconfigured feed is gone either way", got, want)
+	}
+	if !f.FetchedAt.Equal(stale) {
+		t.Errorf("FetchedAt = %s, want the seeded %s — nothing was fetched, so the pool must still read as stale", f.FetchedAt, stale)
 	}
 }

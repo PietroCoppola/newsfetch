@@ -180,8 +180,10 @@ func refreshFollowing(ctx context.Context, cfg config.Config, now time.Time) err
 	// not a refresh failure — it is precisely the situation R-37 covers,
 	// and every feed below simply rebuilds from a full 200.
 	var cached []fetch.Story
+	var cachedAt time.Time
 	if f, err := cache.Read(path); err == nil {
 		cached = f.Stories
+		cachedAt = f.FetchedAt
 	}
 	// Story.Feed is the attribution key the merge decides on, so it is the
 	// key coverage is measured with too.
@@ -209,16 +211,41 @@ func refreshFollowing(ctx context.Context, cfg config.Config, now time.Time) err
 	for url, e := range errs {
 		_ = refreshlog.Append(fmt.Sprintf("following %s: %s", url, e))
 	}
+	configured := cfg.FeedURLs()
 	if len(results) == 0 {
 		if len(errs) > 0 {
-			// Nothing succeeded, so there is no new truth to write: the
-			// stale file and its old FetchedAt both stand.
+			// Nothing succeeded, so there is no new truth about any feed's
+			// CONTENT: a configured feed that could not be reached keeps
+			// the stories it had, and the old FetchedAt stands so the pool
+			// still reads stale and the next refresh retries.
+			//
+			// Configuration is a different question, and the early return
+			// used to conflate the two. A feed the user unsubscribed from
+			// is gone whether or not this pass reached the network, and
+			// this merge is the only place that drops one — so a feed set
+			// where every fetch keeps failing used to keep a removed feed's
+			// stories on disk indefinitely. Merging against no results
+			// keeps every configured feed's cached stories untouched and
+			// drops only the unconfigured ones, which is exactly the
+			// difference wanted here.
+			//
+			// The write is skipped unless something actually dropped, so
+			// the ordinary total failure still leaves the file
+			// byte-identical, and it carries the cache's OWN FetchedAt: a
+			// refresh that fetched nothing must not stamp the pool fresh
+			// and buy itself a TTL of silence. A failed prune is logged,
+			// not returned — the caller counts the fetch failure below, and
+			// the render paths filter the same feeds out anyway.
+			if pruned := mergeFollowingStories(cached, nil, nil, configured); len(pruned) != len(cached) {
+				if err := writeCache(path, pruned, cachedAt); err != nil {
+					_ = refreshlog.Append(fmt.Sprintf("following prune: %s", err))
+				}
+			}
 			return fmt.Errorf("all %d feeds failed", len(errs))
 		}
 		return nil
 	}
 
-	configured := cfg.FeedURLs()
 	merged := mergeFollowingStories(cached, fetched, results, configured)
 	if err := writeCache(path, merged, now); err != nil {
 		return fmt.Errorf("write following cache: %w", err)
