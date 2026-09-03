@@ -43,6 +43,14 @@ type poolPick struct {
 //
 // An empty pool is not an error: a cold cache is the normal
 // first-run-of-a-new-pool case, and rank.SelectN would reject it.
+//
+// The within-pool collapse is the other half of R-38. The working set
+// assemblePools threads between pools stops one article being printed by
+// two DIFFERENT pools, and rank.Filter drops what was already shown, but
+// neither looks at two candidates inside THIS pool that are the same
+// article — an aggregator feed sitting beside the blog it mirrors is the
+// ordinary way that happens — so at a count above 1 the pool could fill
+// two of its own slots with one story.
 func selectFromPool(p poolPick, seen map[string]struct{}, cfg config.Config, bypassWhenAllSeen bool, now time.Time, rng *rand.Rand) ([]fetch.Story, error) {
 	if len(p.Stories) == 0 {
 		return nil, nil
@@ -54,6 +62,10 @@ func selectFromPool(p poolPick, seen map[string]struct{}, cfg config.Config, byp
 		}
 		candidates = p.Stories
 	}
+	// After the bypass, so the last-resort path collapses too: repeating
+	// one article is the concession R-31 makes, printing it twice in the
+	// same box is not.
+	candidates = dedupByHash(candidates)
 	picked, err := rank.SelectN(candidates, p.Count, rank.Options{
 		Topics:      cfg.Topics,
 		Now:         now,
@@ -64,6 +76,28 @@ func selectFromPool(p poolPick, seen map[string]struct{}, cfg config.Config, byp
 		return nil, fmt.Errorf("select stories: %w", err)
 	}
 	return picked, nil
+}
+
+// dedupByHash keeps the first candidate for each fetch.Story.Hash,
+// preserving order. Hash normalises away tracking parameters, host casing
+// and www./m. prefixes, which is exactly what makes the same article
+// arriving from two feeds detectable as one story.
+//
+// First-seen wins rather than best-scoring: the surviving copies are ranked
+// afterwards anyway, and picking a winner here would put a second, quieter
+// ranking rule in a function whose whole job is to count articles.
+func dedupByHash(stories []fetch.Story) []fetch.Story {
+	seen := make(map[string]struct{}, len(stories))
+	out := stories[:0:0]
+	for _, s := range stories {
+		h := s.Hash()
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // feedWeights builds the following pool's per-feed cadence multipliers,

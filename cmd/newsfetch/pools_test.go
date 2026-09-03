@@ -1160,3 +1160,70 @@ func TestAssemblePools_RemovedFeedIsNotRendered(t *testing.T) {
 		t.Errorf("rendered %d stories, want 0", len(rendered))
 	}
 }
+
+// TestAssemblePools_SyndicatedArticleRendersOnceWithinAPool is the
+// within-pool half of R-38. The cross-pool case above is handled by the
+// working set, and the pre-filter removes anything already shown, but
+// nothing used to collapse two candidates that share a hash INSIDE one
+// pool — and two followed feeds carrying the same article is the ordinary
+// shape of an aggregator feed sitting beside the blog it mirrors. At a
+// following_count above 1 the pool then printed the reader the same
+// article twice in one box.
+//
+// The assertion is on the rendered output rather than on the candidate
+// list: what matters is what the user sees, and --style=json is the one
+// render that can be counted exactly.
+func TestAssemblePools_SyndicatedArticleRendersOnceWithinAPool(t *testing.T) {
+	isolateXDG(t)
+	captureSpawn(t)
+	now := time.Now().UTC()
+
+	const syndicated = "https://origin.example/the-syndicated-post"
+	fromBlog := fetch.Story{
+		ID: "blog-1", Title: "The syndicated post", URL: syndicated,
+		Source: "following", Feed: "https://a.example/feed.xml",
+		CreatedAt: now.Add(-2 * time.Hour), Tags: []string{},
+	}
+	fromMirror := fetch.Story{
+		ID: "mirror-1", Title: "The syndicated post (via the mirror)", URL: syndicated,
+		Source: "following", Feed: "https://b.example/feed.xml",
+		CreatedAt: now.Add(-3 * time.Hour), Tags: []string{},
+	}
+	if fromBlog.Hash() != fromMirror.Hash() {
+		t.Fatalf("test premise broken: %q != %q", fromBlog.Hash(), fromMirror.Hash())
+	}
+	if fromBlog.ID == fromMirror.ID || fromBlog.Feed == fromMirror.Feed {
+		t.Fatal("test premise broken: the two candidates must be distinct stories")
+	}
+
+	cfg := poolTestCfg()
+	// Following alone, so nothing the news pool does can supply or absorb
+	// a slot and blur which pool the duplicate came from.
+	cfg.Pools = []string{"following"}
+	cfg.PoolOrder = []string{"following"}
+	// Two slots and exactly two candidates: without the collapse the pool
+	// fills both, on every seed.
+	cfg.FollowingCount = 2
+	seedPoolCache(t, "following", now.Add(-time.Minute), []fetch.Story{fromBlog, fromMirror})
+
+	pools, _, err := assemblePools(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	cfgJSON := cfg
+	cfgJSON.Style = "json"
+	var buf bytes.Buffer
+	if err := writePools(&buf, pools, cfgJSON, now); err != nil {
+		t.Fatalf("writePools: %v", err)
+	}
+	var elements []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &elements); err != nil {
+		t.Fatalf("json render did not parse: %v; got %q", err, buf.String())
+	}
+	if len(elements) != 1 {
+		t.Fatalf("rendered %d stories, want 1 — the same article reached the reader twice: %q", len(elements), buf.String())
+	}
+	if elements[0]["url"] != syndicated {
+		t.Errorf("rendered url = %v, want %q", elements[0]["url"], syndicated)
+	}
+}
