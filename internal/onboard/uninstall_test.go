@@ -354,6 +354,58 @@ func TestUninstallFlow_PathErrorPropagates(t *testing.T) {
 	}
 }
 
+// canObserveUnlinkOrder empirically checks whether this filesystem's
+// directory-mtime resolution can separate two back-to-back unlinks — the
+// exact mechanism TestUninstallFlow_DataRemovedBeforeLock relies on to
+// observe removal order without touching production code. It removes one
+// file from each of two throwaway directories, back to back with no delay,
+// and reports whether the directories' resulting mtimes come out strictly
+// ordered. A single trial can tie by bad luck even on a filesystem that
+// normally resolves finely, so a handful of independent trials are tried
+// before concluding the filesystem cannot do it; a coarse, tick-driven
+// clock (common on ubuntu-latest, where this suite runs in CI) ties on
+// every trial, while a fine one (darwin/APFS, this project's development
+// platform) reliably distinguishes the pair.
+func canObserveUnlinkOrder(t *testing.T) bool {
+	t.Helper()
+	const trials = 5
+	for i := 0; i < trials; i++ {
+		dir := t.TempDir()
+		d1 := filepath.Join(dir, "d1")
+		d2 := filepath.Join(dir, "d2")
+		for _, d := range []string{d1, d2} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f1 := filepath.Join(d1, "a")
+		f2 := filepath.Join(d2, "b")
+		for _, f := range []string{f1, f2} {
+			if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Remove(f1); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(f2); err != nil {
+			t.Fatal(err)
+		}
+		s1, err := os.Stat(d1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s2, err := os.Stat(d2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s1.ModTime().Before(s2.ModTime()) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestUninstallFlow_DataRemovedBeforeLock pins the ordering inside
 // removeEntry that TestUninstallFlow_HeldLockKeepsProtectedFile cannot:
 // that test proves the sidecar is taken before either unlink happens, but
@@ -383,11 +435,18 @@ func TestUninstallFlow_PathErrorPropagates(t *testing.T) {
 // mtime marks exactly when its one file was removed — a side effect of
 // the real os.Remove calls UninstallFlow already makes, not anything added
 // to watch it. Two unlinks issued back to back from the same goroutine
-// reliably produce distinguishable mtimes on the filesystems this project
-// runs its tests on (measured tens of microseconds apart on darwin/APFS);
-// this is the same style of tie the flow's own timeout constant assumes
-// away, not a new assumption.
+// reliably produce distinguishable mtimes on darwin/APFS, this project's
+// development platform (measured tens of microseconds apart) — but not on
+// every filesystem: ubuntu-latest, where CI runs this suite, commonly
+// ties directory mtimes to a coarse, tick-driven clock rather than a fine
+// one, where two unlinks microseconds apart can land on the identical
+// timestamp. canObserveUnlinkOrder probes that empirically, with the same
+// mechanism, rather than trusting a GOOS check or an assumption pinned to
+// one machine.
 func TestUninstallFlow_DataRemovedBeforeLock(t *testing.T) {
+	if !canObserveUnlinkOrder(t) {
+		t.Skip("this filesystem's directory-mtime resolution cannot separate two back-to-back unlinks, so the data-before-lock removal order cannot be observed here — an environmental limitation of this filesystem, not a disabled test")
+	}
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	lockDir := filepath.Join(dir, "lock")
