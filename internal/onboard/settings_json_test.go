@@ -453,3 +453,72 @@ func TestReadSettingsJSON_SourcesKeyIsADeliberateBreak(t *testing.T) {
 		t.Errorf("error should name the offending key; got %v", err)
 	}
 }
+
+// TestReadSettingsJSON_AdvancedKnobsValidated is the --settings twin of
+// TestReadInitJSON_AdvancedKnobsValidated. It matters more here: a
+// --settings save rewrites the user's whole config file, so an unchecked
+// value is not merely written once but written over whatever was valid
+// before.
+func TestReadSettingsJSON_AdvancedKnobsValidated(t *testing.T) {
+	const head = `{"topics":[],"style":"boxed","pools":["news"],"count":1,`
+	cases := []struct {
+		name string
+		body string
+		// wantErr is the substring the message must name; "" means the
+		// value is valid and must be carried through.
+		wantErr string
+	}{
+		{"cache ttl negative", head + `"cache_ttl_minutes":-1}`, "cache_ttl_minutes"},
+		{"cache ttl zero", head + `"cache_ttl_minutes":0}`, "cache_ttl_minutes"},
+		{"cache ttl one below floor", head + `"cache_ttl_minutes":4}`, "cache_ttl_minutes"},
+		{"cache ttl at floor", head + `"cache_ttl_minutes":5}`, ""},
+		{"cache ttl above floor", head + `"cache_ttl_minutes":6}`, ""},
+		{"min points negative", head + `"min_points":-1}`, "min_points"},
+		{"min points at floor", head + `"min_points":0}`, ""},
+		{"min points above floor", head + `"min_points":1}`, ""},
+		{"dedup ttl negative", head + `"dedup_ttl_hours":-1}`, "dedup_ttl_hours"},
+		{"dedup ttl at floor", head + `"dedup_ttl_hours":0}`, ""},
+		{"dedup ttl above floor", head + `"dedup_ttl_hours":1}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ReadSettingsJSON(strings.NewReader(tc.body), curr)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ReadSettingsJSON: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q should name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestReadSettingsJSON_OutOfRangeCurrentSurvivesOmission keeps the new
+// range checks on the payload only. A hand-edited config.toml can hold a
+// cache_ttl_minutes of 1 — config.Validate clamps it at render time and
+// warns — and that value arrives here through current. Rejecting the save
+// over a field the caller never sent would blame the wrong edit and, worse,
+// leave the user no way to fix anything else through --settings. Same rule
+// pool_order already follows.
+func TestReadSettingsJSON_OutOfRangeCurrentSurvivesOmission(t *testing.T) {
+	bad := curr
+	bad.CacheTTLMinutes = 1
+	bad.MinPoints = -5
+	bad.DedupTTLHours = -2
+	got, err := ReadSettingsJSON(strings.NewReader(
+		`{"topics":[],"style":"minimal","pools":["news","following"],"count":1}`,
+	), bad)
+	if err != nil {
+		t.Fatalf("ReadSettingsJSON: %v", err)
+	}
+	if got.CacheTTLMinutes != 1 || got.MinPoints != -5 || got.DedupTTLHours != -2 {
+		t.Errorf("omitted knobs = %d/%d/%d, want current's 1/-5/-2 untouched",
+			got.CacheTTLMinutes, got.MinPoints, got.DedupTTLHours)
+	}
+}

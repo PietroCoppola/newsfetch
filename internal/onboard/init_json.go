@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/render"
@@ -134,20 +135,22 @@ func ReadInitJSON(r io.Reader) (Answers, error) {
 	if raw.TickerBoxed != nil {
 		a.TickerBoxed = *raw.TickerBoxed
 	}
-	// No range validation here: cache_ttl_minutes, min_points, and
-	// dedup_ttl_hours have no exported floor to check against (config.Validate
-	// owns minCacheTTL privately), and a hand-edited config.toml already
-	// reaches disk with unvalidated values for these three today — Validate
-	// clamps and warns at the next render either way. Carrying the raw int
-	// through here keeps that one behaviour rather than inventing a second,
-	// JSON-only floor that could drift from config.Validate's.
 	if raw.CacheTTLMinutes != nil {
+		if err := validateCacheTTLMinutes("--init", *raw.CacheTTLMinutes); err != nil {
+			return Answers{}, err
+		}
 		a.CacheTTLMinutes = *raw.CacheTTLMinutes
 	}
 	if raw.MinPoints != nil {
+		if err := validateMinPoints("--init", *raw.MinPoints); err != nil {
+			return Answers{}, err
+		}
 		a.MinPoints = *raw.MinPoints
 	}
 	if raw.DedupTTLHours != nil {
+		if err := validateDedupTTLHours("--init", *raw.DedupTTLHours); err != nil {
+			return Answers{}, err
+		}
 		a.DedupTTLHours = *raw.DedupTTLHours
 	}
 	if raw.News != nil && raw.News.Aggregators != nil {
@@ -349,6 +352,39 @@ func validatePoolOrder(flag string, order, pools []string) error {
 func validateFollowingCount(flag string, n int) error {
 	if n < 1 || n > defaults.MaxCount {
 		return fmt.Errorf("%s JSON: following_count=%d out of [1, %d]", flag, n, defaults.MaxCount)
+	}
+	return nil
+}
+
+// validateCacheTTLMinutes, validateMinPoints and validateDedupTTLHours
+// reject the three wizard-hidden knobs when they fall below the floors
+// config.Validate enforces on a TOML file. The floors come from
+// internal/config rather than being restated here: these values are written
+// straight to config.toml by OverwriteConfig, and Validate's clamp is
+// in-memory only, so a JSON boundary that accepted what the config path
+// rejects would leave the user a file that is wrong on disk forever and
+// warns on every terminal open.
+//
+// Only a floor, no ceiling, because that is what config.Validate checks:
+// there is no upper bound on any of the three, and inventing one here would
+// be the same drift in the other direction.
+func validateCacheTTLMinutes(flag string, n int) error {
+	if n < config.MinCacheTTLMinutes {
+		return fmt.Errorf("%s JSON: cache_ttl_minutes=%d below minimum %d", flag, n, config.MinCacheTTLMinutes)
+	}
+	return nil
+}
+
+func validateMinPoints(flag string, n int) error {
+	if n < config.MinPointsFloor {
+		return fmt.Errorf("%s JSON: min_points=%d below minimum %d", flag, n, config.MinPointsFloor)
+	}
+	return nil
+}
+
+func validateDedupTTLHours(flag string, n int) error {
+	if n < config.MinDedupTTLHours {
+		return fmt.Errorf("%s JSON: dedup_ttl_hours=%d below minimum %d (0 disables dedup)", flag, n, config.MinDedupTTLHours)
 	}
 	return nil
 }

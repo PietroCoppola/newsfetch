@@ -130,15 +130,27 @@ func ReadSettingsJSON(r io.Reader, current Answers) (Answers, error) {
 	if raw.TickerBoxed != nil {
 		a.TickerBoxed = *raw.TickerBoxed
 	}
-	// No range validation here — see ReadInitJSON's identical note by its
-	// own cache_ttl_minutes/min_points/dedup_ttl_hours block.
+	// Validated only when the caller supplied them, for the same reason
+	// pool_order is: an inherited value came off the user's existing config,
+	// where config.Validate clamps it at render time, and failing the save
+	// over a field the payload never mentioned would blame the wrong edit
+	// and leave no way to fix anything else through --settings.
 	if raw.CacheTTLMinutes != nil {
+		if err := validateCacheTTLMinutes("--settings", *raw.CacheTTLMinutes); err != nil {
+			return Answers{}, err
+		}
 		a.CacheTTLMinutes = *raw.CacheTTLMinutes
 	}
 	if raw.MinPoints != nil {
+		if err := validateMinPoints("--settings", *raw.MinPoints); err != nil {
+			return Answers{}, err
+		}
 		a.MinPoints = *raw.MinPoints
 	}
 	if raw.DedupTTLHours != nil {
+		if err := validateDedupTTLHours("--settings", *raw.DedupTTLHours); err != nil {
+			return Answers{}, err
+		}
 		a.DedupTTLHours = *raw.DedupTTLHours
 	}
 	if raw.News != nil && raw.News.Aggregators != nil {

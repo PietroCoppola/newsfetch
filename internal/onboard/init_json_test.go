@@ -548,3 +548,48 @@ func TestValidateFeedURL(t *testing.T) {
 		})
 	}
 }
+
+// TestReadInitJSON_AdvancedKnobsValidated pins the three wizard-hidden knobs
+// to the same floors config.Validate enforces. They reach disk through
+// OverwriteConfig, and the in-memory clamp at the next render never repairs
+// the file, so a scripted caller who writes cache_ttl_minutes=0 keeps a
+// permanently invalid config plus a warning line on every terminal open.
+// The floors are inclusive: 5 minutes, 0 points and 0 hours are all valid.
+func TestReadInitJSON_AdvancedKnobsValidated(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		// wantErr is the substring the message must name; "" means the
+		// value is valid and must be carried through.
+		wantErr string
+	}{
+		{"cache ttl negative", `{"topics":[],"style":"boxed","cache_ttl_minutes":-1}`, "cache_ttl_minutes"},
+		{"cache ttl zero", `{"topics":[],"style":"boxed","cache_ttl_minutes":0}`, "cache_ttl_minutes"},
+		{"cache ttl one below floor", `{"topics":[],"style":"boxed","cache_ttl_minutes":4}`, "cache_ttl_minutes"},
+		{"cache ttl at floor", `{"topics":[],"style":"boxed","cache_ttl_minutes":5}`, ""},
+		{"cache ttl above floor", `{"topics":[],"style":"boxed","cache_ttl_minutes":6}`, ""},
+		{"min points negative", `{"topics":[],"style":"boxed","min_points":-1}`, "min_points"},
+		{"min points at floor", `{"topics":[],"style":"boxed","min_points":0}`, ""},
+		{"min points above floor", `{"topics":[],"style":"boxed","min_points":1}`, ""},
+		{"dedup ttl negative", `{"topics":[],"style":"boxed","dedup_ttl_hours":-1}`, "dedup_ttl_hours"},
+		{"dedup ttl at floor", `{"topics":[],"style":"boxed","dedup_ttl_hours":0}`, ""},
+		{"dedup ttl above floor", `{"topics":[],"style":"boxed","dedup_ttl_hours":1}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ReadInitJSON(strings.NewReader(tc.body))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ReadInitJSON: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q should name %q", err, tc.wantErr)
+			}
+		})
+	}
+}

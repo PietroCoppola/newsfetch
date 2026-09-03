@@ -23,11 +23,27 @@ type FieldSources struct {
 	Count string
 }
 
-// minCacheTTL is the validation floor for cache_ttl_minutes. It lives here
-// (not in internal/defaults) because it's a validation concern — the default
-// TTL sits comfortably above this floor; the floor only matters when a user
-// sets a too-small value via config or flag.
-const minCacheTTL = 5 * time.Minute
+// MinCacheTTLMinutes, MinPointsFloor and MinDedupTTLHours are the validation
+// floors for the three advanced config knobs, spelled in the units the
+// config file uses. They live here (not in internal/defaults) because they
+// are a validation concern — every default sits comfortably inside them, and
+// a floor only matters once a user types a value.
+//
+// Exported because the TOML path is not the only one that has to honour
+// them: the scripted --init/--settings JSON readers reject what this package
+// clamps, and they must reject it at exactly these numbers. A floor spelled
+// twice is a floor that drifts, and the two halves disagreeing is how an
+// invalid value gets written to a config file that Validate then only ever
+// repairs in memory.
+const (
+	MinCacheTTLMinutes = 5
+	MinPointsFloor     = 0
+	MinDedupTTLHours   = 0
+)
+
+// minCacheTTL is MinCacheTTLMinutes as a Duration, which is what Config
+// carries.
+const minCacheTTL = MinCacheTTLMinutes * time.Minute
 
 // Validate inspects the merged Config, clamps out-of-range fields, and emits
 // at most one warning line to w naming the offending field and its source.
@@ -67,7 +83,6 @@ const minCacheTTL = 5 * time.Minute
 // time against io.Discard, and pool_order's permutation normalisation has to
 // survive that without appending anything twice.
 func Validate(c Config, src FieldSources, w io.Writer) Config {
-	minMins := int(minCacheTTL / time.Minute)
 	// These two corrections happen before the cascade because entries
 	// further down read their results: the all-empty-pools rule must see
 	// the aggregator list AFTER unknown names are dropped and the feed list
@@ -136,13 +151,13 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 	if c.CacheTTL < minCacheTTL {
 		badMins := int(c.CacheTTL / time.Minute)
 		c.CacheTTL = minCacheTTL
-		fmt.Fprintf(w, "newsfetch: cache_ttl_minutes=%d below minimum %d, using %d\n", badMins, minMins, minMins)
+		fmt.Fprintf(w, "newsfetch: cache_ttl_minutes=%d below minimum %d, using %d\n", badMins, MinCacheTTLMinutes, MinCacheTTLMinutes)
 		return silentlyCorrect(c)
 	}
-	if c.MinPoints < 0 {
+	if c.MinPoints < MinPointsFloor {
 		bad := c.MinPoints
-		c.MinPoints = 0
-		fmt.Fprintf(w, "newsfetch: min_points=%d below 0, using 0\n", bad)
+		c.MinPoints = MinPointsFloor
+		fmt.Fprintf(w, "newsfetch: min_points=%d below %d, using %d\n", bad, MinPointsFloor, MinPointsFloor)
 		return silentlyCorrect(c)
 	}
 	if c.Count < 1 || c.Count > defaults.MaxCount {
@@ -165,9 +180,9 @@ func Validate(c Config, src FieldSources, w io.Writer) Config {
 		fmt.Fprintf(w, "newsfetch: unknown ticker_marker %q (from config), using %q\n", bad, c.TickerMarker)
 		return silentlyCorrect(c)
 	}
-	if c.DedupWindow < 0 {
+	if c.DedupWindow < MinDedupTTLHours*time.Hour {
 		bad := int(c.DedupWindow / time.Hour)
-		c.DedupWindow = 0
+		c.DedupWindow = MinDedupTTLHours * time.Hour
 		fmt.Fprintf(w, "newsfetch: dedup_ttl_hours=%d negative, treating as 0 (history dedup disabled)\n", bad)
 		return silentlyCorrect(c)
 	}
@@ -210,8 +225,8 @@ func silentlyCorrect(c Config) Config {
 	if c.CacheTTL < minCacheTTL {
 		c.CacheTTL = minCacheTTL
 	}
-	if c.MinPoints < 0 {
-		c.MinPoints = 0
+	if c.MinPoints < MinPointsFloor {
+		c.MinPoints = MinPointsFloor
 	}
 	if valid, _ := splitPools(c.Pools); len(valid) == 0 {
 		c.Pools = defaults.Pools()
@@ -233,8 +248,8 @@ func silentlyCorrect(c Config) Config {
 	if !knownTickerMarker(c.TickerMarker) {
 		c.TickerMarker = Defaults().TickerMarker
 	}
-	if c.DedupWindow < 0 {
-		c.DedupWindow = 0
+	if c.DedupWindow < MinDedupTTLHours*time.Hour {
+		c.DedupWindow = MinDedupTTLHours * time.Hour
 	}
 	return c
 }
