@@ -353,3 +353,117 @@ func TestUninstallFlow_PathErrorPropagates(t *testing.T) {
 		t.Errorf("config must not be touched when resolution fails: %v", err)
 	}
 }
+
+// TestUninstallFlow_DataRemovedBeforeLock pins the ordering inside
+// removeEntry that TestUninstallFlow_HeldLockKeepsProtectedFile cannot:
+// that test proves the sidecar is taken before either unlink happens, but
+// says nothing about which of the two unlinks comes first — both orders
+// leave the same end state (both files gone), so nothing in the suite
+// above would notice them swapped.
+//
+// The order matters because of what happens the instant the lock *path*
+// is unlinked: os.OpenFile(path, O_CREATE, ...) on a name that no longer
+// exists creates a fresh inode, so a racing lockfile.Acquire on that same
+// path succeeds immediately — it cannot see the still-open, still-flocked
+// original. That window exists no matter which file is removed first; what
+// changes is what a writer who slips through it does. With the lock
+// removed last (data file gone first), a slipped-through writer merely
+// recreates the data file — the known, accepted "state reappears" residual
+// from a legitimate concurrent write. Reversed, the window opens before
+// the data file is gone: a writer can slip through, write a fresh file,
+// and this function's own subsequent removal of the data file silently
+// deletes that write. That is loss of a legitimate concurrent write, not
+// mere staleness, and the statusline takes this exact lock on every
+// terminal prompt, so the window is not hypothetical.
+//
+// To observe the order without adding a recording hook to production code,
+// the test puts the data file and the lock file in separate, otherwise
+// untouched directories. Unlinking a file changes its parent directory's
+// own mtime (the directory's entry list changed), so each directory's
+// mtime marks exactly when its one file was removed — a side effect of
+// the real os.Remove calls UninstallFlow already makes, not anything added
+// to watch it. Two unlinks issued back to back from the same goroutine
+// reliably produce distinguishable mtimes on the filesystems this project
+// runs its tests on (measured tens of microseconds apart on darwin/APFS);
+// this is the same style of tie the flow's own timeout constant assumes
+// away, not a new assumption.
+func TestUninstallFlow_DataRemovedBeforeLock(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	lockDir := filepath.Join(dir, "lock")
+	for _, d := range []string{dataDir, lockDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataPath := filepath.Join(dataDir, "sessions.json")
+	lockPath := filepath.Join(lockDir, "sessions.lock")
+	for _, p := range []string{dataPath, lockPath} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rcPath := filepath.Join(dir, ".bashrc")
+	if err := os.WriteFile(rcPath, []byte(BeginMarker+"\nnewsfetch\n"+EndMarker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := UninstallDeps{
+		Shell:   func() (Shell, error) { return Shell{Name: "bash", RCPath: rcPath}, nil },
+		Out:     &bytes.Buffer{},
+		Confirm: func(string) bool { return true },
+		// Config resolves to a path with nothing on disk, so that group
+		// asks nothing and only the state group's removal runs.
+		Config: fixedRemovable("config.toml", filepath.Join(dir, "config.toml")),
+		State:  []Removable{lockedRemovable("sessions.json", dataPath, lockPath)},
+	}
+	if err := UninstallFlow(deps); err != nil {
+		t.Fatalf("UninstallFlow: %v", err)
+	}
+
+	dataDirInfo, err := os.Stat(dataDir)
+	if err != nil {
+		t.Fatalf("stat data dir: %v", err)
+	}
+	lockDirInfo, err := os.Stat(lockDir)
+	if err != nil {
+		t.Fatalf("stat lock dir: %v", err)
+	}
+	if !dataDirInfo.ModTime().Before(lockDirInfo.ModTime()) {
+		t.Errorf("data file's directory mtime (%v) is not strictly before the lock file's directory mtime (%v): sessions.json must be unlinked before sessions.lock, or a concurrent writer that slips through the reopened lock has its write silently deleted by this function's own trailing removal",
+			dataDirInfo.ModTime(), lockDirInfo.ModTime())
+	}
+}
+
+// TestUninstallFlow_OrphanedLockCountsAsPresent pins the widening
+// described on maybeRemoveGroup: an entry counts as present when either
+// its data file or its lock sidecar exists on disk, not only its data
+// file. Without it, a seen.lock left behind by a crash — with no
+// seen.json anywhere near it, since the crash happened before the write
+// that would have created one — would never be swept up: the group would
+// never see it as present, never prompt, and the orphan would survive
+// every future --uninstall.
+func TestUninstallFlow_OrphanedLockCountsAsPresent(t *testing.T) {
+	tree, _, deps := newUninstallTree(t, false)
+	const sessions = 1 // index of sessions.json in tree.state / tree.stateLocks
+	if err := os.WriteFile(tree.stateLocks[sessions], []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompts := 0
+	deps.Confirm = func(prompt string) bool {
+		prompts++
+		return true
+	}
+	if err := UninstallFlow(deps); err != nil {
+		t.Fatalf("UninstallFlow: %v", err)
+	}
+	if prompts != 1 {
+		t.Errorf("Confirm calls = %d, want 1 (state group has an orphaned lock and nothing else on disk)", prompts)
+	}
+	if _, err := os.Stat(tree.state[sessions]); !os.IsNotExist(err) {
+		t.Errorf("sessions.json should still be absent — it was never created")
+	}
+	if _, err := os.Stat(tree.stateLocks[sessions]); !os.IsNotExist(err) {
+		t.Errorf("orphaned lock %s should have been removed", tree.stateLocks[sessions])
+	}
+}
