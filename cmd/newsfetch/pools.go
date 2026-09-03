@@ -182,6 +182,13 @@ func assemblePools(cfg config.Config, seen map[string]struct{}, now time.Time, r
 			return nil, nil, fmt.Errorf("pool %q: %w", name, err)
 		}
 		stories, present, fresh := readPoolCache(path, cfg.CacheTTL, now)
+		if name == "following" {
+			// The configured feed list decides what may render, not what
+			// happens to be on disk. Filtering AFTER readPoolCache, never
+			// inside it: presence and freshness describe the FILE (R-36),
+			// and must not move because the user edited their feed list.
+			stories = configuredFeedStories(stories, cfg.FeedURLs())
+		}
 		if name == "news" && len(stories) == 0 {
 			fetched, err := fetchNewsCold(cfg, path, errOut)
 			if err != nil {
@@ -270,6 +277,41 @@ func assemblePools(cfg config.Config, seen map[string]struct{}, now time.Time, r
 		spawnRefresh()
 	}
 	return pools, rendered, nil
+}
+
+// configuredFeedStories keeps only the following-pool stories attributed to
+// a currently configured feed. Story.Feed is the attribution key, the same
+// one mergeFollowingStories decides on.
+//
+// It exists because pruning on the write side alone is not enough. The merge
+// that drops an unsubscribed feed runs only when a refresh brought at least
+// one feed result back, so between the unsubscribe and the next at least
+// partly successful refresh the cache still holds the removed feed's
+// stories — and a feed set where every fetch keeps failing makes that
+// interval unbounded. Both read surfaces filter, because both read
+// following.json independently: filtering on one of them would leave the
+// other showing a feed the user removed.
+//
+// An unattributed story (empty Feed) cannot be matched against the list and
+// so does not survive. Nothing writes one — fetch.Following stamps every
+// story with the configured URL it came from — and for a torn or
+// hand-edited file, dropping what cannot be attributed is the direction
+// that honours the user's list.
+func configuredFeedStories(stories []fetch.Story, configured []string) []fetch.Story {
+	if len(stories) == 0 {
+		return stories
+	}
+	allowed := make(map[string]bool, len(configured))
+	for _, url := range configured {
+		allowed[url] = true
+	}
+	out := make([]fetch.Story, 0, len(stories))
+	for _, s := range stories {
+		if allowed[s.Feed] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // readPoolCache reads one pool's cache file, reporting its stories, whether

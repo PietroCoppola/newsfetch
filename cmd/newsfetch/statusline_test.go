@@ -921,3 +921,36 @@ func TestStatusline_LastResortHonoursReversedPoolOrder(t *testing.T) {
 		t.Error("the boxed render repeats the news pool but the status row does not: two surfaces, one user, one state")
 	}
 }
+
+// TestPickStatusline_RemovedFeedIsNotRendered is the statusline half of
+// TestAssemblePools_RemovedFeedIsNotRendered. The two surfaces read
+// following.json independently, so a filter on one of them is a filter on
+// neither: the status row runs on every prompt and would keep showing the
+// unsubscribed feed's story on all of them.
+//
+// The cache is fresh and present, so needRefresh must stay false: a
+// following pool with nothing left to show after the filter is not a stale
+// cache (R-36), and spawning a refresh per prompt off it would be the worst
+// place in the binary to get that wrong.
+func TestPickStatusline_RemovedFeedIsNotRendered(t *testing.T) {
+	isolateXDG(t)
+	now := time.Now().UTC()
+
+	cfg := poolTestCfg()
+	cfg.Pools = []string{"following"}
+	cfg.PoolOrder = []string{"following"}
+	seedPoolCache(t, "following", now.Add(-time.Minute), []fetch.Story{
+		followingStory("gone", "From a feed the user removed", "removed.example", removedFeedURL, now.Add(-2*time.Hour)),
+	})
+
+	got, needRefresh, err := pickStatusline(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if !errors.Is(err, errNoCachedStories) {
+		t.Fatalf("pickStatusline = (%q, %v, %v), want errNoCachedStories — %q is no longer configured", got.Title, needRefresh, err, removedFeedURL)
+	}
+	if needRefresh {
+		t.Error("needRefresh = true, want false: the cache is present and fresh, it just holds nothing renderable")
+	}
+	if n := historyLen(t); n != 0 {
+		t.Errorf("history entries = %d, want 0 (nothing was rendered)", n)
+	}
+}

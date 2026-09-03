@@ -1116,3 +1116,47 @@ func TestAssemblePools_OfflineColdStartAsksForABackgroundRefresh(t *testing.T) {
 		t.Errorf("spawned %d refreshes, want exactly 1 — an empty render must still leave the next one warm", *spawns)
 	}
 }
+
+// removedFeedURL is a feed URL that appears in no test config: seeding a
+// following cache with a story attributed to it models the user having
+// unsubscribed from that feed while its stories were still cached.
+const removedFeedURL = "https://removed.example/feed.xml"
+
+// TestAssemblePools_RemovedFeedIsNotRendered pins the render-side feed
+// filter. Dropping a story whose feed the user unsubscribed from happens in
+// mergeFollowingStories, which runs only when a refresh got at least one
+// feed result back — so an unsubscribe followed by a run of total refresh
+// failures leaves the removed feed's stories in following.json for as long
+// as the failures last. The render path must not serve them: the CONFIGURED
+// feed list decides what the following pool may show, not what happens to be
+// on disk.
+//
+// The seeded cache is fresh and holds nothing but the removed feed's story,
+// so no other rule can carry the assertion: without the filter that story is
+// the pool's only candidate and it renders.
+func TestAssemblePools_RemovedFeedIsNotRendered(t *testing.T) {
+	isolateXDG(t)
+	captureSpawn(t)
+	now := time.Now().UTC()
+
+	cfg := poolTestCfg()
+	cfg.Pools = []string{"following"}
+	cfg.PoolOrder = []string{"following"}
+	seedPoolCache(t, "following", now.Add(-time.Minute), []fetch.Story{
+		followingStory("gone", "From a feed the user removed", "removed.example", removedFeedURL, now.Add(-2*time.Hour)),
+	})
+
+	pools, rendered, err := assemblePools(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	if len(pools) != 1 || pools[0].Name != "following" {
+		t.Fatalf("pools = %+v, want exactly the following pool", pools)
+	}
+	if len(pools[0].Stories) != 0 {
+		t.Errorf("following pool rendered %d stories, want 0 — %q is no longer configured", len(pools[0].Stories), removedFeedURL)
+	}
+	if len(rendered) != 0 {
+		t.Errorf("rendered %d stories, want 0", len(rendered))
+	}
+}

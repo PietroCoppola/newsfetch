@@ -257,6 +257,14 @@ func pickStatusline(cfg config.Config, seen map[string]struct{}, now time.Time, 
 	if cfg.FollowingActive() {
 		following = readStatuslinePool("following", cfg.CacheTTL, now)
 		needRefresh = needRefresh || following.needsRefresh()
+		// A feed the user unsubscribed from stops showing here on the next
+		// render, not on the next successful refresh — the same rule
+		// assemblePools applies to the boxed path, and applied on both
+		// surfaces because both read following.json for themselves. Note
+		// the order: staleness is read off the FILE first (R-36), so a
+		// present, fresh cache that this filter empties still asks for
+		// nothing.
+		following.stories = configuredFeedStories(following.stories, cfg.FeedURLs())
 	}
 	if cfg.NewsActive() {
 		news = readStatuslinePool("news", cfg.CacheTTL, now)
