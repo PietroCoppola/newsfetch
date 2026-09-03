@@ -1267,8 +1267,9 @@ weight = 2.5
 }
 
 // TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated pins fix round 2's
-// reversal of fix round 1: runSettings's Current closure must NOT run the
-// loaded config through config.Validate before projecting it into Answers.
+// reversal of fix round 1: settingsCurrent (SettingsDeps.Current's
+// production implementation) must NOT run the loaded config through
+// config.Validate before projecting it into Answers.
 //
 // Fix round 1 added that Validate call to resolve config.Load's internal
 // "explicit zero" sentinel (see TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk
@@ -1277,18 +1278,23 @@ weight = 2.5
 // unparseable, relative, or missing a supported scheme (see
 // internal/config/validate.go's feedURLProblem) — meant to keep unusable
 // feeds off the render/fetch path. But OverwriteConfig regenerates the
-// ENTIRE config file from Answers, so validating in Current would make the
-// very next `--settings` save silently DELETE that feed's line, with no
-// warning (the writer is discarded). A mistyped URL is the one part of a
-// feed entry a user cannot reconstruct from memory, unlike an out-of-range
-// max_items/weight, which is just a number Validate would clamp back into
-// range. A user who mistypes a URL today sees a per-render warning and can
-// go fix the character; they must not lose the line entirely just because
-// they ran --settings for something unrelated.
+// ENTIRE config file from Answers, so validating in settingsCurrent would
+// make the very next `--settings` save silently DELETE that feed's line,
+// with no warning (the writer is discarded). A mistyped URL is the one
+// part of a feed entry a user cannot reconstruct from memory, unlike an
+// out-of-range max_items/weight, which is just a number Validate would
+// clamp back into range. A user who mistypes a URL today sees a per-render
+// warning and can go fix the character; they must not lose the line
+// entirely just because they ran --settings for something unrelated.
 //
-// If a future change reintroduces config.Validate on this path, this test
-// is what should catch it: the round trip must be byte-identical, invalid
-// URL included.
+// This test calls settingsCurrent itself rather than re-implementing its
+// two steps (config.Load then settingsAnswers) inline. Fix round 2's first
+// version did the latter, with a comment claiming it matched Current
+// "exactly" — and it passed even after the coordinator re-applied the
+// mistake to the real closure, because a re-implementation cannot observe
+// a change to the thing it re-implements. Driving settingsCurrent directly
+// is what makes this test able to catch config.Validate being reintroduced
+// there.
 func TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated(t *testing.T) {
 	const fixture = `# newsfetch config. Edit freely; see spec.md for field meanings.
 
@@ -1312,6 +1318,9 @@ url = "example.com/feed.xml"
 	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
+	// Prove the premise: this URL is exactly the shape config.Validate
+	// drops. Without this, the test would not demonstrate why
+	// settingsCurrent must skip Validate, only that it happens to.
 	cfg, err := config.Load(src)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
@@ -1319,17 +1328,18 @@ url = "example.com/feed.xml"
 	if len(cfg.Following.Feeds) != 1 || cfg.Following.Feeds[0].URL != "example.com/feed.xml" {
 		t.Fatalf("fixture did not decode the invalid-URL feed as loaded: %+v", cfg.Following.Feeds)
 	}
-	// Prove the premise: this URL is exactly the shape config.Validate
-	// drops. Without this, the test would not demonstrate why Current must
-	// skip Validate, only that it happens to.
 	validated := config.Validate(cfg, config.FieldSources{}, io.Discard)
 	if len(validated.Following.Feeds) != 0 {
 		t.Fatalf("fixture URL no longer trips config.Validate's feed-drop rule, test no longer proves anything: %+v", validated.Following.Feeds)
 	}
-	// The actual settings flow: config.Load -> settingsAnswers, with no
-	// config.Validate in between, exactly as Current does it.
+	// Drive the real production path — settingsCurrent itself, the exact
+	// function SettingsFlow calls as Current — not a reimplementation of it.
+	a, err := settingsCurrent(src)
+	if err != nil {
+		t.Fatalf("settingsCurrent: %v", err)
+	}
 	out := filepath.Join(dir, "rewritten.toml")
-	if err := onboard.OverwriteConfig(out, settingsAnswers(cfg)); err != nil {
+	if err := onboard.OverwriteConfig(out, a); err != nil {
 		t.Fatalf("OverwriteConfig: %v", err)
 	}
 	got, err := os.ReadFile(out)

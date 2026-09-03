@@ -135,34 +135,41 @@ func pickAnswerSource(in *os.File) func() (onboard.Answers, error) {
 func runSettings(out io.Writer) error {
 	return onboard.SettingsFlow(onboard.SettingsDeps{
 		ConfigPath: config.Path,
-		Current: func(path string) (onboard.Answers, error) {
-			cfg, err := config.Load(path)
-			if err != nil {
-				return onboard.Answers{}, err
-			}
-			// Deliberately NOT config.Validate'd. Validate treats a feed
-			// with an unparseable, relative, or non-http(s) URL as unusable
-			// and drops it (splitFeeds in internal/config/validate.go), a
-			// rule that exists to keep bad feeds off the render/fetch path.
-			// But OverwriteConfig regenerates the ENTIRE file from Answers,
-			// so validating here would make the very next `--settings` save
-			// silently delete that feed's line from config.toml — the URL
-			// is the one part of a feed entry a user cannot get back,
-			// unlike an out-of-range max_items/weight, which is just a
-			// clamped number. A user who mistypes a URL currently sees a
-			// per-render warning and can fix the character; validating in
-			// Current would instead erase the line the first time they save
-			// settings for any unrelated reason. settingsAnswers's own
-			// guard (see below) is what keeps the OTHER end of this path
-			// safe — config.Load's internal "explicit zero" sentinel for a
-			// typed max_items=0/weight=0 — without paying that price. See
-			// TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated in
-			// main_test.go, which pins this decision.
-			return settingsAnswers(cfg), nil
-		},
-		Answers: pickSettingsAnswerSource(os.Stdin),
-		Out:     out,
+		Current:    settingsCurrent,
+		Answers:    pickSettingsAnswerSource(os.Stdin),
+		Out:        out,
 	})
+}
+
+// settingsCurrent is SettingsDeps.Current's production implementation: load
+// the config file and project it into Answers. Pulled out of runSettings
+// into a named function — not for testability alone, but because the
+// closure it replaced carried a comment longer than the code — and that
+// naming is what makes the decision below reachable from a test that
+// drives the real call, rather than one that re-implements its two lines
+// and quietly stops covering it the moment they diverge.
+//
+// Deliberately NOT config.Validate'd. Validate treats a feed with an
+// unparseable, relative, or non-http(s) URL as unusable and drops it
+// (splitFeeds in internal/config/validate.go), a rule that exists to keep
+// bad feeds off the render/fetch path. But OverwriteConfig regenerates the
+// ENTIRE file from Answers, so validating here would make the very next
+// `--settings` save silently delete that feed's line from config.toml —
+// the URL is the one part of a feed entry a user cannot get back, unlike
+// an out-of-range max_items/weight, which is just a clamped number. A user
+// who mistypes a URL currently sees a per-render warning and can fix the
+// character; validating here would instead erase the line the first time
+// they save settings for any unrelated reason. settingsAnswers's own guard
+// is what keeps the OTHER end of this path safe — config.Load's internal
+// "explicit zero" sentinel for a typed max_items=0/weight=0 — without
+// paying that price. See TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated
+// in main_test.go, which drives this exact function to pin the decision.
+func settingsCurrent(path string) (onboard.Answers, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return onboard.Answers{}, err
+	}
+	return settingsAnswers(cfg), nil
 }
 
 // settingsAnswers projects a loaded Config into the Answers shape the
