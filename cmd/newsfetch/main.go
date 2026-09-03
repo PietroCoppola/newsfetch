@@ -284,26 +284,28 @@ func runUninstall(out io.Writer, in *os.File) error {
 	if !interactive {
 		printKeptState(out)
 	}
+	printKeptLocks(out)
 	return nil
 }
 
-// cacheRemovables lists everything newsfetch writes under the cache root.
-// All of it is rebuildable by one fetch, which is why it sits in a group
-// the piped path is allowed to clear. refresh.lock is included because a
-// bare lock file left behind in an otherwise empty directory is confusing
-// rather than useful.
+// cacheRemovables lists the data files newsfetch writes under the cache
+// root. All of it is rebuildable by one fetch, which is why it sits in a
+// group the piped path is allowed to clear.
+//
+// refresh.lock used to be listed here, on the grounds that a bare lock
+// file left behind in an otherwise empty directory reads as litter. It is
+// not litter: it is the entire mutual exclusion for the detached
+// background refresh, which try-acquires it with a zero timeout and exits
+// quietly when it is already held. Unlink it while a refresh is in flight
+// and the next spawn creates a fresh inode at the same name, acquires
+// that, and refreshes alongside the one already running — each believing
+// it is the only one. A lock file's path is its identity, so no uninstall
+// path removes one; printKeptLocks says so in a line.
 func cacheRemovables() []onboard.Removable {
 	return []onboard.Removable{
 		{Label: "feed.json", Path: func() (string, error) { return cache.PoolPath("news") }},
 		{Label: "following.json", Path: func() (string, error) { return cache.PoolPath("following") }},
 		{Label: "refresh.log", Path: refreshlog.Path},
-		{Label: "refresh.lock", Path: func() (string, error) {
-			dir, err := cache.Dir()
-			if err != nil {
-				return "", err
-			}
-			return filepath.Join(dir, "refresh.lock"), nil
-		}},
 	}
 }
 
@@ -313,13 +315,14 @@ func cacheRemovables() []onboard.Removable {
 // cadence observation that can only be re-earned in real time.
 //
 // Each one carries its flock sidecar as Lock rather than appearing as a
-// seventh, eighth and ninth entry. All three are written under that lock
-// by a concurrent newsfetch — the statusline takes sessions.lock on every
+// fourth, fifth and sixth entry. All three are written under that lock by
+// a concurrent newsfetch — the statusline takes sessions.lock on every
 // terminal prompt — and unlinking a file out from under an flock holder
 // does not stop it writing, so UninstallFlow takes the lock and holds it
-// across both unlinks. The cache group needs none of this: everything in
-// it is rebuildable by one fetch, which is why the piped path may clear
-// it, and refresh.lock stays a plain entry for the same reason.
+// across the unlink. It never removes the sidecar: that path is the
+// identity every other process coordinates on. The cache group needs no
+// sidecar at all — everything in it is rebuildable by one fetch, which is
+// why the piped path may clear it.
 func stateRemovables() []onboard.Removable {
 	return []onboard.Removable{
 		{Label: "seen.json", Path: history.Path, Lock: lockSidecar(history.Path, "seen.lock")},
@@ -371,6 +374,47 @@ func printKeptState(out io.Writer) {
 	}
 	fmt.Fprintf(out, "newsfetch: state kept in %s (%s); delete that directory to remove it\n",
 		dir, strings.Join(kept, ", "))
+}
+
+// printKeptLocks names the .lock files --uninstall deliberately leaves on
+// disk, in the same shape as the kept-state notice: the paths, one reason,
+// and no command to paste. A lock file's path is its identity — unlink one
+// and a second process can create and lock a fresh file at the same name
+// while the first still holds the original — so uninstall removes the
+// files a lock guards and never the lock. The files are empty, but a user
+// who came to remove newsfetch is owed the fact that four zero-byte files
+// survived it.
+//
+// The state sidecars are read off stateRemovables rather than named again
+// here, so the two lists cannot drift. It prints on both the interactive
+// and the piped path, and is silent when no lock file exists, so a machine
+// that never ran newsfetch gets no epilogue.
+func printKeptLocks(out io.Writer) {
+	kept := make([]string, 0, 4)
+	if dir, err := cache.Dir(); err == nil {
+		kept = appendExisting(kept, refreshLockPath(dir))
+	}
+	for _, r := range stateRemovables() {
+		if r.Lock == nil {
+			continue
+		}
+		if p, err := r.Lock(); err == nil {
+			kept = appendExisting(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "newsfetch: lock files kept (%s); they are empty, and removing one while newsfetch is running would let two processes hold the same lock at once\n",
+		strings.Join(kept, ", "))
+}
+
+// appendExisting appends path to dst if something is at path.
+func appendExisting(dst []string, path string) []string {
+	if _, err := os.Stat(path); err != nil {
+		return dst
+	}
+	return append(dst, path)
 }
 
 // promptYesNo returns a Confirm function for UninstallFlow. If in is a
@@ -663,6 +707,14 @@ Subcommands:
 // Following-only user does not exit 1 on every refresh. That is a
 // deliberate change to what a non-zero --__refresh exit means: it used to
 // mean "no source produced stories", and now means "no pool did".
+// refreshLockPath names the sidecar that makes runRefresh single-flight,
+// in the cache directory dir. It is a function so the refresh and the
+// uninstall notice that reports the lock as kept cannot disagree about
+// where it lives.
+func refreshLockPath(dir string) string {
+	return filepath.Join(dir, "refresh.lock")
+}
+
 func runRefresh() error {
 	dir, err := cache.Dir()
 	if err != nil {
@@ -671,7 +723,7 @@ func runRefresh() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
-	lock, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), 0)
+	lock, err := lockfile.Acquire(refreshLockPath(dir), 0)
 	if err != nil {
 		if errors.Is(err, lockfile.ErrHeld) {
 			// Another refresh is in flight and will warm every pool's cache

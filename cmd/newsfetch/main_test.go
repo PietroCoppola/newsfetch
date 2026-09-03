@@ -1409,16 +1409,17 @@ func TestRunUninstall_PipedKeepsState(t *testing.T) {
 		newsCache,
 		followingCache,
 		logPath,
-		filepath.Join(cacheDir, "refresh.lock"),
 	}
-	kept := []string{
-		seenPath,
+	// refresh.lock sits with the caches but is not one: it is the whole
+	// mutual exclusion for the detached background refresh, so it is kept
+	// for the same reason the state sidecars are.
+	locks := []string{
+		filepath.Join(cacheDir, "refresh.lock"),
 		filepath.Join(stateDir, "seen.lock"),
-		sessionsPath,
 		filepath.Join(stateDir, "sessions.lock"),
-		feedsPath,
 		filepath.Join(stateDir, "feeds.lock"),
 	}
+	kept := append([]string{seenPath, sessionsPath, feedsPath}, locks...)
 	for _, p := range append(append([]string{}, removed...), kept...) {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
@@ -1447,10 +1448,15 @@ func TestRunUninstall_PipedKeepsState(t *testing.T) {
 	}
 	for _, p := range kept {
 		if _, err := os.Stat(p); err != nil {
-			t.Errorf("piped uninstall must not touch state file %s: %v", p, err)
+			t.Errorf("piped uninstall must not touch %s: %v", p, err)
 		}
 	}
 	got := out.String()
+	for _, p := range locks {
+		if !strings.Contains(got, p) {
+			t.Errorf("kept-locks notice should name %s so the user knows what is left behind and why:\n%s", p, got)
+		}
+	}
 	if !strings.Contains(got, stateDir) {
 		t.Errorf("kept-state notice should name the state directory %s:\n%s", stateDir, got)
 	}
@@ -1468,6 +1474,46 @@ func TestRunUninstall_PipedKeepsState(t *testing.T) {
 	}
 	if strings.Contains(got, "[y/N]") {
 		t.Errorf("piped uninstall must not print a prompt:\n%s", got)
+	}
+}
+
+// TestCacheRemovables_ExcludesLockFiles pins refresh.lock's removal from
+// the cache roster. It was listed there because a bare lock file left
+// behind in an otherwise empty directory reads as litter — but it is the
+// sole mutual exclusion for the detached background refresh, which
+// acquires it with a zero timeout and exits quietly when it is already
+// held. Unlink it mid-flight and the next refresh creates a fresh inode at
+// the same name, acquires that, and runs alongside the refresh already
+// running, each believing it is the only one. No cache entry may resolve
+// to a .lock path.
+//
+// The roster is checked for its data files too: an entry list that had
+// simply gone empty would satisfy the .lock rule while quietly leaving
+// every cache file on disk forever.
+func TestCacheRemovables_ExcludesLockFiles(t *testing.T) {
+	isolateXDG(t)
+
+	want := map[string]bool{"feed.json": true, "following.json": true, "refresh.log": true}
+	got := cacheRemovables()
+	seen := map[string]bool{}
+	for _, r := range got {
+		if r.Path == nil {
+			t.Errorf("cache roster entry %q has a nil Path", r.Label)
+			continue
+		}
+		path, err := r.Path()
+		if err != nil {
+			t.Fatalf("%s: Path(): %v", r.Label, err)
+		}
+		if filepath.Ext(path) == ".lock" || filepath.Ext(r.Label) == ".lock" {
+			t.Errorf("cache roster entry %q resolves to %s: unlinking a lock path lets a second process create and lock a fresh file at that name, and for refresh.lock that means two background refreshes running at once", r.Label, path)
+		}
+		seen[r.Label] = true
+	}
+	for label := range want {
+		if !seen[label] {
+			t.Errorf("cache roster is missing %q", label)
+		}
 	}
 }
 

@@ -93,8 +93,8 @@ terminal:
 - **Interactive** (stdin is a real terminal): asks once per group, and
   only for a group that has something on disk to remove.
   - **config** — `config.toml`
-  - **caches** — `feed.json`, `following.json`, `refresh.log`,
-    `refresh.lock`; all rebuildable by one fetch
+  - **caches** — `feed.json`, `following.json`, `refresh.log`; all
+    rebuildable by one fetch
   - **state** — `seen.json` (dedup history), `sessions.json` (statusline
     session pins), `feeds.json` (up to four weeks of following-feed
     cadence and HTTP-conditional-GET data) — offered only in this mode
@@ -105,6 +105,13 @@ terminal:
   deliberately never removes, and never even asks about, state — that
   group is left off the roster entirely — and instead prints the
   directory it was kept in.
+
+No `--uninstall` removes a `.lock` file, in either mode: `refresh.lock`,
+`seen.lock`, `sessions.lock` and `feeds.lock` are how concurrent newsfetch
+processes stay out of each other's way, and a lock file's path is its
+identity — unlink one and a second process can create and lock a fresh
+file at the same name while the first still holds the original. They are
+zero bytes, and the last line of an uninstall names the ones it left.
 
 The asymmetry is intentional: config is a minute of retyping and caches
 rebuild themselves on the next fetch, so a piped run is allowed to clear

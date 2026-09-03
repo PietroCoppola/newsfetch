@@ -31,8 +31,9 @@ func lockedRemovable(label, path, lock string) Removable {
 // Grouping the paths the way UninstallDeps groups them keeps the
 // per-group assertions honest. state and stateLocks are parallel slices:
 // stateLocks[i] is the sidecar attached to state[i], never a roster entry
-// of its own, so it is removed under its own lock and never named in
-// output.
+// of its own: it is acquired while state[i] is removed and then left on
+// disk, because a lock file's path is the identity every other newsfetch
+// process coordinates on.
 type uninstallTree struct {
 	rcPath     string
 	config     string
@@ -50,8 +51,10 @@ func (u uninstallTree) all() []string {
 	return paths
 }
 
-// everyFile is all() plus the sidecars: what must exist before, and be
-// gone after, a fully confirmed uninstall.
+// everyFile is all() plus the sidecars: everything that must exist before
+// an uninstall runs. It is not the list a confirmed uninstall empties —
+// the sidecars survive every path, which is TestUninstallFlow_LockPathsSurvive's
+// subject.
 func (u uninstallTree) everyFile() []string {
 	return append(u.all(), u.stateLocks...)
 }
@@ -69,7 +72,6 @@ func newUninstallTree(t *testing.T, withFiles bool) (uninstallTree, *bytes.Buffe
 			filepath.Join(dir, "feed.json"),
 			filepath.Join(dir, "following.json"),
 			filepath.Join(dir, "refresh.log"),
-			filepath.Join(dir, "refresh.lock"),
 		},
 		state: []string{
 			filepath.Join(dir, "seen.json"),
@@ -178,11 +180,15 @@ func TestUninstallFlow_ConfirmYesRemovesEveryGroup(t *testing.T) {
 	if prompts != 3 {
 		t.Errorf("Confirm calls = %d, want 3 (config + caches + state)", prompts)
 	}
-	// everyFile, not all: the state sidecars are removed under their own
-	// lock rather than as roster entries, and must still be gone.
-	for _, p := range tree.everyFile() {
+	// all, not everyFile: the data files go, and the sidecars stay.
+	for _, p := range tree.all() {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s should have been removed", p)
+		}
+	}
+	for _, p := range tree.stateLocks {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("lock sidecar %s must survive a fully confirmed uninstall: %v", p, err)
 		}
 	}
 }
@@ -320,8 +326,8 @@ func TestUninstallFlow_HeldLockKeepsProtectedFile(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s should still have been removed", p)
 		}
-		if _, err := os.Stat(tree.stateLocks[i]); !os.IsNotExist(err) {
-			t.Errorf("%s should still have been removed", tree.stateLocks[i])
+		if _, err := os.Stat(tree.stateLocks[i]); err != nil {
+			t.Errorf("%s must survive: uninstall never unlinks a lock path: %v", tree.stateLocks[i], err)
 		}
 	}
 	if _, err := os.Stat(tree.config); !os.IsNotExist(err) {
@@ -354,160 +360,52 @@ func TestUninstallFlow_PathErrorPropagates(t *testing.T) {
 	}
 }
 
-// canObserveUnlinkOrder empirically checks whether this filesystem's
-// directory-mtime resolution can separate two back-to-back unlinks — the
-// exact mechanism TestUninstallFlow_DataRemovedBeforeLock relies on to
-// observe removal order without touching production code. It removes one
-// file from each of two throwaway directories, back to back with no delay,
-// and reports whether the directories' resulting mtimes come out strictly
-// ordered. This is repeated across several independent trials, and EVERY
-// trial must separate before the filesystem is declared observable: the
-// real assertion downstream gets only a single attempt, so a lenient
-// any-trial-separates probe would let a borderline-precision filesystem —
-// one that separates most of the time but occasionally ties — pass here and
-// then genuinely tie on the one attempt that counts, turning the exact
-// flakiness this probe exists to prevent into a test failure instead of a
-// skip. A coarse, tick-driven clock (common on ubuntu-latest, where this
-// suite runs in CI) ties on every trial, while a fine one (darwin/APFS,
-// this project's development platform) reliably distinguishes every pair.
-func canObserveUnlinkOrder(t *testing.T) bool {
-	t.Helper()
-	const trials = 5
-	for i := 0; i < trials; i++ {
-		dir := t.TempDir()
-		d1 := filepath.Join(dir, "d1")
-		d2 := filepath.Join(dir, "d2")
-		for _, d := range []string{d1, d2} {
-			if err := os.MkdirAll(d, 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-		f1 := filepath.Join(d1, "a")
-		f2 := filepath.Join(d2, "b")
-		for _, f := range []string{f1, f2} {
-			if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.Remove(f1); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Remove(f2); err != nil {
-			t.Fatal(err)
-		}
-		s1, err := os.Stat(d1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		s2, err := os.Stat(d2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !s1.ModTime().Before(s2.ModTime()) {
-			return false
-		}
-	}
-	return true
-}
-
-// TestUninstallFlow_DataRemovedBeforeLock pins the ordering inside
-// removeEntry that TestUninstallFlow_HeldLockKeepsProtectedFile cannot:
-// that test proves the sidecar is taken before either unlink happens, but
-// says nothing about which of the two unlinks comes first — both orders
-// leave the same end state (both files gone), so nothing in the suite
-// above would notice them swapped.
+// TestUninstallFlow_LockPathsSurvive replaces
+// TestUninstallFlow_DataRemovedBeforeLock, which pinned the order of two
+// unlinks — data file first, sidecar second — and documented the leftover
+// race as an accepted "state reappears" residual. That rationale does not
+// hold. os.OpenFile(path, O_CREATE, ...) on a name that no longer exists
+// creates a fresh inode, so the instant a lock *path* is unlinked a racing
+// lockfile.Acquire on that path succeeds immediately: it cannot see the
+// still-open, still-flocked original, and two processes then both believe
+// they hold the same lock. No ordering of the unlinks repairs that — it
+// only moves the window, and the residual is broken mutual exclusion, not
+// staleness. A lock file's path is its identity, and the file is zero
+// bytes, so uninstall now removes data files and never removes a lock.
 //
-// The order matters because of what happens the instant the lock *path*
-// is unlinked: os.OpenFile(path, O_CREATE, ...) on a name that no longer
-// exists creates a fresh inode, so a racing lockfile.Acquire on that same
-// path succeeds immediately — it cannot see the still-open, still-flocked
-// original. That window exists no matter which file is removed first; what
-// changes is what a writer who slips through it does. With the lock
-// removed last (data file gone first), a slipped-through writer merely
-// recreates the data file — the known, accepted "state reappears" residual
-// from a legitimate concurrent write. Reversed, the window opens before
-// the data file is gone: a writer can slip through, write a fresh file,
-// and this function's own subsequent removal of the data file silently
-// deletes that write. That is loss of a legitimate concurrent write, not
-// mere staleness, and the statusline takes this exact lock on every
-// terminal prompt, so the window is not hypothetical.
-//
-// To observe the order without adding a recording hook to production code,
-// the test puts the data file and the lock file in separate, otherwise
-// untouched directories. Unlinking a file changes its parent directory's
-// own mtime (the directory's entry list changed), so each directory's
-// mtime marks exactly when its one file was removed — a side effect of
-// the real os.Remove calls UninstallFlow already makes, not anything added
-// to watch it. Two unlinks issued back to back from the same goroutine
-// reliably produce distinguishable mtimes on darwin/APFS, this project's
-// development platform (measured tens of microseconds apart) — but not on
-// every filesystem: ubuntu-latest, where CI runs this suite, commonly
-// ties directory mtimes to a coarse, tick-driven clock rather than a fine
-// one, where two unlinks microseconds apart can land on the identical
-// timestamp. canObserveUnlinkOrder probes that empirically, with the same
-// mechanism, rather than trusting a GOOS check or an assumption pinned to
-// one machine.
-func TestUninstallFlow_DataRemovedBeforeLock(t *testing.T) {
-	if !canObserveUnlinkOrder(t) {
-		t.Skip("this filesystem's directory-mtime resolution cannot separate two back-to-back unlinks, so the data-before-lock removal order cannot be observed here — an environmental limitation of this filesystem, not a disabled test")
-	}
-	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "data")
-	lockDir := filepath.Join(dir, "lock")
-	for _, d := range []string{dataDir, lockDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	dataPath := filepath.Join(dataDir, "sessions.json")
-	lockPath := filepath.Join(lockDir, "sessions.lock")
-	for _, p := range []string{dataPath, lockPath} {
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rcPath := filepath.Join(dir, ".bashrc")
-	if err := os.WriteFile(rcPath, []byte(BeginMarker+"\nnewsfetch\n"+EndMarker+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	deps := UninstallDeps{
-		Shell:   func() (Shell, error) { return Shell{Name: "bash", RCPath: rcPath}, nil },
-		Out:     &bytes.Buffer{},
-		Confirm: func(string) bool { return true },
-		// Config resolves to a path with nothing on disk, so that group
-		// asks nothing and only the state group's removal runs.
-		Config: fixedRemovable("config.toml", filepath.Join(dir, "config.toml")),
-		State:  []Removable{lockedRemovable("sessions.json", dataPath, lockPath)},
-	}
+// The confirmed state group is the interactive shape, the only one that
+// reaches a locked entry at all: runUninstall withholds State from a piped
+// run.
+func TestUninstallFlow_LockPathsSurvive(t *testing.T) {
+	tree, out, deps := newUninstallTree(t, true)
+	deps.Confirm = func(string) bool { return true }
 	if err := UninstallFlow(deps); err != nil {
 		t.Fatalf("UninstallFlow: %v", err)
 	}
-
-	dataDirInfo, err := os.Stat(dataDir)
-	if err != nil {
-		t.Fatalf("stat data dir: %v", err)
+	for _, p := range tree.stateLocks {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed: unlinking a lock path lets a second process create and lock a fresh file at that name while the first still holds the original, breaking the exclusion every writer of the guarded file relies on (%v)", p, err)
+		}
 	}
-	lockDirInfo, err := os.Stat(lockDir)
-	if err != nil {
-		t.Fatalf("stat lock dir: %v", err)
-	}
-	if !dataDirInfo.ModTime().Before(lockDirInfo.ModTime()) {
-		t.Errorf("data file's directory mtime (%v) is not strictly before the lock file's directory mtime (%v): sessions.json must be unlinked before sessions.lock, or a concurrent writer that slips through the reopened lock has its write silently deleted by this function's own trailing removal",
-			dataDirInfo.ModTime(), lockDirInfo.ModTime())
+	// A sidecar is bookkeeping the user never created. Leaving it must not
+	// add a per-file line to an already chatty uninstall; the one-line
+	// notice that names them all lives in cmd/newsfetch.
+	for _, p := range tree.stateLocks {
+		if strings.Contains(out.String(), p) {
+			t.Errorf("lock sidecar %s should not be named per-file in uninstall output:\n%s", p, out.String())
+		}
 	}
 }
 
-// TestUninstallFlow_OrphanedLockCountsAsPresent pins the widening
-// described on maybeRemoveGroup: an entry counts as present when either
-// its data file or its lock sidecar exists on disk, not only its data
-// file. Without it, a seen.lock left behind by a crash — with no
-// seen.json anywhere near it, since the crash happened before the write
-// that would have created one — would never be swept up: the group would
-// never see it as present, never prompt, and the orphan would survive
-// every future --uninstall.
-func TestUninstallFlow_OrphanedLockCountsAsPresent(t *testing.T) {
-	tree, _, deps := newUninstallTree(t, false)
+// TestUninstallFlow_OrphanedLockIsNotPresent reverses
+// TestUninstallFlow_OrphanedLockCountsAsPresent, which widened the
+// presence check to "data file or sidecar exists" for one reason: to sweep
+// up a .lock a crash had left behind. Nothing sweeps lock files up any
+// more, so that widening now buys only a prompt about a file that is
+// already gone which, answered yes, removes nothing and prints nothing. An
+// entry is present when its data file is.
+func TestUninstallFlow_OrphanedLockIsNotPresent(t *testing.T) {
+	tree, out, deps := newUninstallTree(t, false)
 	const sessions = 1 // index of sessions.json in tree.state / tree.stateLocks
 	if err := os.WriteFile(tree.stateLocks[sessions], []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -520,13 +418,13 @@ func TestUninstallFlow_OrphanedLockCountsAsPresent(t *testing.T) {
 	if err := UninstallFlow(deps); err != nil {
 		t.Fatalf("UninstallFlow: %v", err)
 	}
-	if prompts != 1 {
-		t.Errorf("Confirm calls = %d, want 1 (state group has an orphaned lock and nothing else on disk)", prompts)
+	if prompts != 0 {
+		t.Errorf("Confirm calls = %d, want 0: a lock file on its own is not something an uninstall can act on", prompts)
 	}
-	if _, err := os.Stat(tree.state[sessions]); !os.IsNotExist(err) {
-		t.Errorf("sessions.json should still be absent — it was never created")
+	if _, err := os.Stat(tree.stateLocks[sessions]); err != nil {
+		t.Errorf("orphaned lock %s must be left alone: %v", tree.stateLocks[sessions], err)
 	}
-	if _, err := os.Stat(tree.stateLocks[sessions]); !os.IsNotExist(err) {
-		t.Errorf("orphaned lock %s should have been removed", tree.stateLocks[sessions])
+	if strings.Contains(out.String(), tree.stateLocks[sessions]) {
+		t.Errorf("an orphaned lock should not be mentioned:\n%s", out.String())
 	}
 }

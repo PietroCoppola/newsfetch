@@ -20,8 +20,10 @@ import (
 //
 // Lock resolves the flock sidecar guarding Path, and is nil for files
 // nothing locks. It is a field on the guarded entry rather than a roster
-// entry of its own so the two unlinks cannot be separated: see
-// removeEntry for why unlinking a locked file on its own is not enough.
+// entry of its own because a lock file is never itself removed — it exists
+// to be held while Path is unlinked. See removeEntry for both halves of
+// that: why unlinking a guarded file without its lock is not enough, and
+// why unlinking the lock is worse.
 type Removable struct {
 	Label string
 	Path  func() (string, error)
@@ -149,14 +151,16 @@ func resolveGroup(items []Removable) ([]resolved, error) {
 // maybeRemoveGroup asks once for the whole group and removes every entry in
 // it on a yes. Entries with nothing on disk are filtered out first, so a
 // group with no files asks nothing and prints nothing — a fresh machine's
-// uninstall stays quiet. An entry counts as present when either its data
-// file or its sidecar exists, so a lock orphaned by a crash is still swept
-// up. Without a Confirm the files are left in place and their paths
-// printed, matching the original non-interactive behaviour.
+// uninstall stays quiet. Presence is the data file alone: no uninstall
+// path removes a lock file (removeEntry says why), so a sidecar left
+// behind by a crash with no data file beside it would buy only a prompt
+// about a file that is already gone, answered yes, that removes nothing.
+// Without a Confirm the files are left in place and their paths printed,
+// matching the original non-interactive behaviour.
 func maybeRemoveGroup(d UninstallDeps, group string, items []resolved) {
 	present := make([]resolved, 0, len(items))
 	for _, it := range items {
-		if exists(it.path) || exists(it.lock) {
+		if exists(it.path) {
 			present = append(present, it)
 		}
 	}
@@ -174,8 +178,9 @@ func maybeRemoveGroup(d UninstallDeps, group string, items []resolved) {
 	}
 }
 
-// exists reports whether path names something on disk. The empty path —
-// an entry with no sidecar — is never anything.
+// exists reports whether path names something on disk. The empty path is
+// never anything, so a resolver that hands back "" cannot make a group
+// look occupied.
 func exists(path string) bool {
 	if path == "" {
 		return false
@@ -184,17 +189,27 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// removeEntry deletes one roster entry. An unguarded file is unlinked
-// directly. A guarded one is not, because os.Remove unlinks a name and
-// does nothing to a process that already holds the file open under an
-// flock: that process keeps writing to the now-orphaned inode, and the
-// next writer creates and locks a brand-new file at the same path. The
-// user sees the state they just deleted reappear. The window is real —
+// removeEntry deletes one roster entry's data file. An unguarded file is
+// unlinked directly. A guarded one is not, because os.Remove unlinks a
+// name and does nothing to a process that already holds the file open
+// under an flock: that process keeps writing to the now-orphaned inode,
+// and the next writer creates and locks a brand-new file at the same path.
+// The user sees the state they just deleted reappear. The window is real —
 // the statusline takes sessions.lock on every terminal prompt — so the
-// sidecar is acquired first and held across both unlinks, released only by
-// the deferred Close. The sidecar is unlinked last, so there is no instant
-// in which the data file is gone while the lock guarding it is still
-// there for a new writer to take.
+// sidecar is acquired first and held across the unlink, released only by
+// the deferred Close.
+//
+// The sidecar itself is never unlinked, and an earlier version of this
+// function that did so was wrong in a way no ordering could fix. A lock
+// file's path IS its identity: os.OpenFile(path, O_CREATE, ...) on a name
+// that no longer exists creates a fresh inode, so the instant the path is
+// gone another process can create and lock a new file there while this one
+// still holds the original and believes it has exclusive access. Removing
+// the data file first only moves that window; it does not close it. The
+// sidecars are zero bytes, and leaving an empty file behind is a trivial
+// cost against silently breaking the mutual exclusion every writer of the
+// guarded file depends on. Callers tell the user what was left: see
+// printKeptLocks in cmd/newsfetch.
 //
 // Contention is not failure: lockfile.ErrHeld means another newsfetch is
 // mid-write, and deleting under it is exactly the race this exists to
@@ -219,16 +234,11 @@ func removeEntry(d UninstallDeps, it resolved) {
 	}
 	defer lock.Close()
 	removeOne(d, it.label, it.path)
-	// The sidecar goes quietly: it is bookkeeping for the file just
-	// removed, not something the user put there or needs a line about.
-	if err := os.Remove(it.lock); err != nil && !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(d.Out, "newsfetch: warning: could not remove %s at %s: %v\n", it.label+" lock", it.lock, err)
-	}
 }
 
 // removeOne unlinks path and reports what happened. An already-absent file
-// is silent: maybeRemoveGroup admits an entry whose sidecar exists without
-// its data file, and "could not remove seen.json" would be a lie there.
+// is silent: another newsfetch may have removed it between the presence
+// check and here, and "could not remove seen.json" would be a lie there.
 func removeOne(d UninstallDeps, label, path string) {
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
