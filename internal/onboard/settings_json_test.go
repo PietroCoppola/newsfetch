@@ -262,6 +262,14 @@ func TestReadSettingsJSON_FeedsValidated(t *testing.T) {
 			`{"topics":[],"style":"boxed","pools":["news"],"count":1,"following":{"feeds":[{"url":"https://a.example/f","weight":-1}]}}`,
 			"weight",
 		},
+		{
+			// Same rule as --init, from the same shared validator: the
+			// two flags must not disagree about what a feed list may
+			// contain.
+			"duplicate url",
+			`{"topics":[],"style":"boxed","pools":["news"],"count":1,"following":{"feeds":[{"url":"https://a.example/f"},{"url":"https://a.example/f"}]}}`,
+			"duplicate url",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

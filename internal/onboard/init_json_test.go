@@ -222,6 +222,15 @@ func TestReadInitJSON_FeedsValidated(t *testing.T) {
 			`{"topics":[],"style":"boxed","following":{"feeds":[{"url":"https://a.example/f","weight":5.1}]}}`,
 			"weight",
 		},
+		{
+			// The interactive wizard refuses a URL it already holds and
+			// the TOML validator collapses one; a scripted caller gets
+			// the loud rejection this reader gives every other per-feed
+			// mistake, naming the index that repeats.
+			"duplicate url",
+			`{"topics":[],"style":"boxed","following":{"feeds":[{"url":"https://a.example/f"},{"url":"https://a.example/f"}]}}`,
+			"duplicate url",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

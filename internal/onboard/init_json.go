@@ -358,11 +358,27 @@ func validateFollowingCount(flag string, n int) error {
 // clamp-and-warn the TOML loader applies to a hand-edited file. The index
 // is in the message because a feed list is usually generated, and "which
 // one" is the only question the caller will have.
+//
+// A repeated URL is one of those rules. Every other configuration surface
+// already refuses one — the interactive wizard will not add a URL it holds,
+// and config.Validate collapses a repeat out of a hand-edited file — and a
+// duplicate that survived would be fetched once per occurrence and could
+// then render the same article more than once. Rejecting rather than
+// collapsing matches this reader's contract for every other feed mistake:
+// a generated list with a repeat in it is a bug in the generator, and a
+// silent collapse would hide it. Equality is the exact string, the same
+// key config.Validate dedups on and the same one Story.Feed and feeds.json
+// are keyed by.
 func validateFeeds(flag string, feeds []Feed) error {
+	seen := make(map[string]int, len(feeds))
 	for i, f := range feeds {
 		if err := ValidateFeedURL(f.URL); err != nil {
 			return fmt.Errorf("%s JSON: following.feeds[%d]: %w", flag, i, err)
 		}
+		if first, dup := seen[f.URL]; dup {
+			return fmt.Errorf("%s JSON: following.feeds[%d]: duplicate url %q (already at index %d)", flag, i, f.URL, first)
+		}
+		seen[f.URL] = i
 		if f.MaxItems != nil && (*f.MaxItems < defaults.MinFeedItems || *f.MaxItems > defaults.MaxFeedItems) {
 			return fmt.Errorf("%s JSON: following.feeds[%d]: max_items=%d out of [%d, %d]",
 				flag, i, *f.MaxItems, defaults.MinFeedItems, defaults.MaxFeedItems)

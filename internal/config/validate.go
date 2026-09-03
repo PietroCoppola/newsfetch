@@ -359,15 +359,40 @@ func knownSource(name string) bool {
 // what a user meant by a relative path — while an out-of-range knob keeps
 // the feed and clamps the number, because the URL is the part that carries
 // the intent.
+//
+// A URL that repeats is dropped too, which is the same rule the interactive
+// wizard enforces by refusing to add a feed it already holds. A
+// hand-edited file was the one surface without it, and left in place a
+// repeat costs the user twice: the fan-out builds one FeedSpec per
+// occurrence, so a duplicate is a second goroutine against a host that
+// already answered, and mergeFollowingStories emits a feed's stories once
+// per configured occurrence, so the pool can then render the same article
+// as many times as the URL appears. The FIRST occurrence wins, keeping its
+// own knobs — a later repeat's max_items or weight is discarded rather
+// than merged, because there is no way to tell which of two conflicting
+// numbers the user meant.
+//
+// Equality is the exact configured string, deliberately unnormalised.
+// Story.Feed, feeds.json and the validator map are all keyed on the URL as
+// written, so two entries this comparison calls different really are two
+// different feeds everywhere downstream; making dedup smarter than those
+// keys is how a feed gets dropped here and then kept elsewhere.
 func splitFeeds(feeds []FeedConfig) ([]FeedConfig, feedIssues) {
 	var out []FeedConfig
 	var iss feedIssues
+	seen := make(map[string]struct{}, len(feeds))
 	for _, f := range feeds {
 		if reason := feedURLProblem(f.URL); reason != "" {
 			iss.dropped++
 			iss.dropReasons = appendUnique(iss.dropReasons, reason)
 			continue
 		}
+		if _, dup := seen[f.URL]; dup {
+			iss.dropped++
+			iss.dropReasons = appendUnique(iss.dropReasons, "duplicate url")
+			continue
+		}
+		seen[f.URL] = struct{}{}
 		var reasons []string
 		// Zero means unset for both knobs and is left alone; Load turns a
 		// value the user actually typed as 0 into a negative so it lands

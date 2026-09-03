@@ -1305,3 +1305,43 @@ func TestValidate_Idempotent(t *testing.T) {
 		})
 	}
 }
+
+// TestValidate_DuplicateFeedURLsCollapse pins the surface agreement with the
+// interactive wizard, which refuses to add a feed URL it already holds. A
+// hand-edited config.toml naming the same URL twice used to reach the fetch
+// fan-out as two specs — two goroutines against one host — and then the
+// merge, which emits a feed's stories once per configured occurrence, so the
+// pool could render the same article twice. The first occurrence wins,
+// carrying its own knobs; the repeat is dropped like any other unusable
+// feed, inside the same aggregated warning line.
+func TestValidate_DuplicateFeedURLsCollapse(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Pools = []string{"news", "following"}
+	cfg.Following.Feeds = []config.FeedConfig{
+		{URL: "https://a.example/feed.xml", MaxItems: 2},
+		{URL: "https://b.example/feed.xml"},
+		{URL: "https://a.example/feed.xml", MaxItems: 5},
+	}
+	var buf bytes.Buffer
+	got := config.Validate(cfg, config.FieldSources{}, &buf)
+	want := []config.FeedConfig{
+		{URL: "https://a.example/feed.xml", MaxItems: 2},
+		{URL: "https://b.example/feed.xml"},
+	}
+	if !reflect.DeepEqual(got.Following.Feeds, want) {
+		t.Errorf("Following.Feeds = %+v, want %+v (first occurrence kept, repeat dropped)", got.Following.Feeds, want)
+	}
+	// FeedURLs is what the fan-out and feedstate are keyed on, so the
+	// collapse has to be visible there and not merely in the warning.
+	wantURLs := []string{"https://a.example/feed.xml", "https://b.example/feed.xml"}
+	if !reflect.DeepEqual(got.FeedURLs(), wantURLs) {
+		t.Errorf("FeedURLs() = %v, want %v", got.FeedURLs(), wantURLs)
+	}
+	out := buf.String()
+	if lines := strings.Count(strings.TrimRight(out, "\n"), "\n") + 1; lines != 1 {
+		t.Errorf("warning lines = %d, want 1; got %q", lines, out)
+	}
+	if !strings.Contains(out, "1 feed dropped") || !strings.Contains(out, "duplicate url") {
+		t.Errorf("warning = %q, want the aggregated feed line naming a duplicate url", out)
+	}
+}
