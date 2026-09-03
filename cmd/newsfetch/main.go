@@ -23,11 +23,13 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/cache"
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
+	"github.com/PietroCoppola/newsfetch/internal/feedstate"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
 	"github.com/PietroCoppola/newsfetch/internal/history"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
+	"github.com/PietroCoppola/newsfetch/internal/session"
 )
 
 const (
@@ -73,7 +75,7 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == uninstallFlag {
-		if err := runUninstall(os.Stdout); err != nil {
+		if err := runUninstall(os.Stdout, os.Stdin); err != nil {
 			fmt.Fprintln(os.Stderr, "newsfetch:", err)
 			os.Exit(1)
 		}
@@ -239,28 +241,143 @@ func pickSettingsAnswerSource(in *os.File) func(onboard.Answers) (onboard.Answer
 	}
 }
 
-// runUninstall removes the shell rc block and offers (interactively, when
-// stdin is a TTY) to also remove the config and cache files. Non-interactive
-// runs default to "no" so scripts that pipe newsfetch don't hang waiting for
-// input. The rc block removal itself is unconditional — that's the user's
-// stated intent by invoking --uninstall.
-func runUninstall(out io.Writer) error {
-	return onboard.UninstallFlow(onboard.UninstallDeps{
-		ConfigPath: config.Path,
-		CachePath:  cache.Path,
-		Shell:      onboard.Detect,
-		Out:        out,
-		Confirm:    promptYesNo(os.Stdin, out),
-	})
+// runUninstall removes the shell rc block and offers to delete the files
+// newsfetch created, in three groups: config, caches, and state. stdin's
+// TTY status decides how much is on the table. A human is asked about all
+// three. A piped run is offered config and caches only — the state group
+// is withheld from the roster entirely and its location printed instead,
+// so a script cannot silently destroy the user's dedup history and four
+// weeks of feed cadence observation. That is not a new restriction: state
+// has never been removable by any uninstall, so the piped path keeps
+// doing exactly what it has always done and only the interactive path
+// gains reach.
+//
+// in is a parameter rather than os.Stdin so tests can hand it a pipe.
+func runUninstall(out io.Writer, in *os.File) error {
+	interactive := term.IsTerminal(int(in.Fd()))
+	deps := onboard.UninstallDeps{
+		Shell:   onboard.Detect,
+		Out:     out,
+		Confirm: promptYesNo(in, out),
+		Config:  onboard.Removable{Label: "config.toml", Path: config.Path},
+		Caches:  cacheRemovables(),
+	}
+	if interactive {
+		deps.State = stateRemovables()
+	}
+	if err := onboard.UninstallFlow(deps); err != nil {
+		return err
+	}
+	if !interactive {
+		printKeptState(out)
+	}
+	return nil
 }
 
-// promptYesNo returns a Confirm function for UninstallFlow. If in is a TTY,
-// the user is asked y/N for each item. If in is not a TTY (script, pipe),
-// the function returns true unconditionally — without an observer to ask,
-// `--uninstall` is read literally as "remove everything". Leaving config and
-// cache behind silently in that case is worse than removing them: the user
-// would never see the "left in place" message and would just have orphaned
-// files.
+// cacheRemovables lists everything newsfetch writes under the cache root.
+// All of it is rebuildable by one fetch, which is why it sits in a group
+// the piped path is allowed to clear. refresh.lock is included because a
+// bare lock file left behind in an otherwise empty directory is confusing
+// rather than useful.
+func cacheRemovables() []onboard.Removable {
+	return []onboard.Removable{
+		{Label: "feed.json", Path: func() (string, error) { return cache.PoolPath("news") }},
+		{Label: "following.json", Path: func() (string, error) { return cache.PoolPath("following") }},
+		{Label: "refresh.log", Path: refreshlog.Path},
+		{Label: "refresh.lock", Path: func() (string, error) {
+			dir, err := cache.Dir()
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(dir, "refresh.lock"), nil
+		}},
+	}
+}
+
+// stateRemovables lists everything under the state root — the files whose
+// loss costs the user something real: seen.json is the dedup memory,
+// sessions.json the statusline pins, feeds.json up to four weeks of
+// cadence observation that can only be re-earned in real time.
+//
+// Each one carries its flock sidecar as Lock rather than appearing as a
+// seventh, eighth and ninth entry. All three are written under that lock
+// by a concurrent newsfetch — the statusline takes sessions.lock on every
+// terminal prompt — and unlinking a file out from under an flock holder
+// does not stop it writing, so UninstallFlow takes the lock and holds it
+// across both unlinks. The cache group needs none of this: everything in
+// it is rebuildable by one fetch, which is why the piped path may clear
+// it, and refresh.lock stays a plain entry for the same reason.
+func stateRemovables() []onboard.Removable {
+	return []onboard.Removable{
+		{Label: "seen.json", Path: history.Path, Lock: lockSidecar(history.Path, "seen.lock")},
+		{Label: "sessions.json", Path: session.Path, Lock: lockSidecar(session.Path, "sessions.lock")},
+		{Label: "feeds.json", Path: feedstate.Path, Lock: lockSidecar(feedstate.Path, "feeds.lock")},
+	}
+}
+
+// lockSidecar derives the path of the advisory-lock file that sits beside
+// a state file, for Removable.Lock. The lock is an implementation detail
+// of each package's read-modify-write, so history, session and feedstate
+// deliberately export no accessor for it; widening three package APIs so
+// uninstall could name three sidecars is the wrong trade. Resolver errors
+// pass through unwrapped — UninstallFlow wraps them once, with the label
+// attached.
+func lockSidecar(base func() (string, error), name string) func() (string, error) {
+	return func() (string, error) {
+		p, err := base()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(filepath.Dir(p), name), nil
+	}
+}
+
+// printKeptState tells a piped --uninstall where the state it deliberately
+// did not touch still lives. It names the directory and stops there. It
+// deliberately does not print an rm -rf command: the path is interpolated
+// from XDG_STATE_HOME, so a space or a shell metacharacter in it produces
+// a command that means something other than what it reads as — and
+// handing someone a destructive command they may paste without reading is
+// a bad trade even when the quoting is right. Silent when no state file
+// exists, so a machine that never rendered a story gets no confusing
+// epilogue.
+func printKeptState(out io.Writer) {
+	seen, err := history.Path()
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(seen)
+	kept := make([]string, 0, 3)
+	for _, name := range []string{"seen.json", "sessions.json", "feeds.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "newsfetch: state kept in %s (%s); delete that directory to remove it\n",
+		dir, strings.Join(kept, ", "))
+}
+
+// promptYesNo returns a Confirm function for UninstallFlow. If in is a
+// TTY, the user is asked y/N once per group — config, caches, state. If in
+// is not a TTY (script, pipe), the function returns true unconditionally:
+// with no observer to ask, leaving files behind is worse than removing
+// them, because the "left in place" line scrolls past unread and the user
+// is left with orphans they never learn about.
+//
+// That unconditional yes used to be documented as reading --uninstall
+// literally as "remove everything", and that phrasing is retired here
+// rather than quietly contradicted. It was written when everything meant
+// two rebuildable files, config.toml and feed.json. The roster has since
+// grown to include seen.json and up to four weeks of cadence observation
+// in feeds.json, and answering yes to those on a script's behalf is a
+// different promise than the one that sentence made. What a piped run is
+// allowed to remove is now decided one level up, in runUninstall, which
+// withholds the state group from the roster entirely when stdin is not a
+// TTY and prints where state was kept. This function still says yes to
+// everything it is asked; it is simply never asked about state.
 func promptYesNo(in *os.File, out io.Writer) func(string) bool {
 	if !term.IsTerminal(int(in.Fd())) {
 		return func(string) bool { return true }

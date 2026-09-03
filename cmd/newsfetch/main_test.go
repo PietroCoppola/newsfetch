@@ -20,11 +20,14 @@ import (
 	"github.com/PietroCoppola/newsfetch/internal/cache"
 	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
+	"github.com/PietroCoppola/newsfetch/internal/feedstate"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/history"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
 	"github.com/PietroCoppola/newsfetch/internal/onboard"
 	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
 	"github.com/PietroCoppola/newsfetch/internal/render"
+	"github.com/PietroCoppola/newsfetch/internal/session"
 )
 
 // isolateXDG points every XDG root (and HOME, which the XDG fallbacks
@@ -1348,5 +1351,116 @@ url = "example.com/feed.xml"
 	}
 	if string(got) != fixture {
 		t.Errorf("a --settings round trip must not delete a feed with an invalid URL\n--- got ---\n%s\n--- want (byte-identical) ---\n%s", got, fixture)
+	}
+}
+
+// TestRunUninstall_PipedKeepsState pins the locked non-TTY rule: a piped
+// --uninstall removes config and the caches, leaves every state file
+// alone, and says in one line where the state it kept still lives. The
+// protection is structural — runUninstall withholds the state group from
+// the roster when stdin is not a TTY — so the Confirm function is still
+// answering yes to everything it is asked.
+func TestRunUninstall_PipedKeepsState(t *testing.T) {
+	isolateXDG(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	cfgPath, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	newsCache, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(news): %v", err)
+	}
+	followingCache, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(following): %v", err)
+	}
+	cacheDir, err := cache.Dir()
+	if err != nil {
+		t.Fatalf("cache.Dir: %v", err)
+	}
+	logPath, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	seenPath, err := history.Path()
+	if err != nil {
+		t.Fatalf("history.Path: %v", err)
+	}
+	sessionsPath, err := session.Path()
+	if err != nil {
+		t.Fatalf("session.Path: %v", err)
+	}
+	feedsPath, err := feedstate.Path()
+	if err != nil {
+		t.Fatalf("feedstate.Path: %v", err)
+	}
+	stateDir := filepath.Dir(seenPath)
+
+	removed := []string{
+		cfgPath,
+		newsCache,
+		followingCache,
+		logPath,
+		filepath.Join(cacheDir, "refresh.lock"),
+	}
+	kept := []string{
+		seenPath,
+		filepath.Join(stateDir, "seen.lock"),
+		sessionsPath,
+		filepath.Join(stateDir, "sessions.lock"),
+		feedsPath,
+		filepath.Join(stateDir, "feeds.lock"),
+	}
+	for _, p := range append(append([]string{}, removed...), kept...) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A pipe read end is a real *os.File that is definitively not a TTY.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close(); w.Close() })
+
+	out := &bytes.Buffer{}
+	if err := runUninstall(out, r); err != nil {
+		t.Fatalf("runUninstall: %v", err)
+	}
+
+	for _, p := range removed {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("piped uninstall should have removed %s", p)
+		}
+	}
+	for _, p := range kept {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("piped uninstall must not touch state file %s: %v", p, err)
+		}
+	}
+	got := out.String()
+	if !strings.Contains(got, stateDir) {
+		t.Errorf("kept-state notice should name the state directory %s:\n%s", stateDir, got)
+	}
+	for _, name := range []string{"seen.json", "sessions.json", "feeds.json"} {
+		if !strings.Contains(got, name) {
+			t.Errorf("kept-state notice should name %s:\n%s", name, got)
+		}
+	}
+	// The notice names the directory; it must never hand the user a
+	// pasteable rm -rf, because the interpolated path is unquoted and a
+	// space or a shell metacharacter in it makes the command mean
+	// something else entirely.
+	if strings.Contains(got, "rm -rf") {
+		t.Errorf("kept-state notice must not print an rm -rf command:\n%s", got)
+	}
+	if strings.Contains(got, "[y/N]") {
+		t.Errorf("piped uninstall must not print a prompt:\n%s", got)
 	}
 }
