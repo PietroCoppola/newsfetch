@@ -1186,3 +1186,82 @@ weight = nan
 		t.Errorf("Weight = %v, want 0 (omitted means no manual override)", back.Following.Feeds[0].Weight)
 	}
 }
+
+// TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk pins the fix
+// round 1 bug: config.Load encodes a max_items/weight the user typed as
+// literal 0 as the internal -1 "explicit zero" sentinel (see
+// config.explicitZeroMarker) so config.Validate can tell that apart from an
+// absent key. Every existing "unset" case up to this point constructed
+// config.FeedConfig directly in Go, which produces a real zero and never
+// exercises the sentinel — this test instead seeds an actual config FILE and
+// decodes it through config.Load, the only place the sentinel is ever
+// produced.
+//
+// settingsAnswers is called directly on the UNVALIDATED config.Load output
+// (no config.Validate in between) on purpose: Current now always validates
+// first, but settingsAnswers's own guard must be correct independent of
+// that — "guard regardless" — so this test exercises exactly the call
+// sequence that leaked the sentinel before this fix:
+// config.Load -> settingsAnswers -> OverwriteConfig.
+func TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk(t *testing.T) {
+	const fixture = `topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+count = 1
+following_count = 1
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://a.example/explicit-zero"
+max_items = 0
+weight = 0
+
+[[following.feeds]]
+url = "https://a.example/absent"
+
+[[following.feeds]]
+url = "https://a.example/valid"
+max_items = 5
+weight = 2.5
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Guard the guard: if config.Load ever stops producing the sentinel for
+	// an explicit zero, this test would pass without exercising the bug.
+	if cfg.Following.Feeds[0].MaxItems != -1 || cfg.Following.Feeds[0].Weight != -1 {
+		t.Fatalf("fixture no longer decodes to the explicit-zero sentinel: %+v", cfg.Following.Feeds[0])
+	}
+	a := settingsAnswers(cfg)
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, a); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if strings.Contains(string(data), "max_items = -1") || strings.Contains(string(data), "weight = -1") {
+		t.Errorf("the explicit-zero sentinel escaped into the rewritten config:\n%s", data)
+	}
+	back, err := config.Load(out)
+	if err != nil {
+		t.Fatalf("rewritten config no longer loads: %v", err)
+	}
+	want := []config.FeedConfig{
+		{URL: "https://a.example/explicit-zero"},
+		{URL: "https://a.example/absent"},
+		{URL: "https://a.example/valid", MaxItems: 5, Weight: 2.5},
+	}
+	if !reflect.DeepEqual(back.Following.Feeds, want) {
+		t.Errorf("Following.Feeds = %+v, want %+v", back.Following.Feeds, want)
+	}
+}

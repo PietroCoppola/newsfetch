@@ -198,7 +198,7 @@ func defaultInitAnswers() Answers {
 
 // RunSettingsWizard drives the interactive --settings UI: a topic multi-
 // select pre-checked with current.Topics, a style picker pre-selected to
-// current.Style, and a source multi-select pre-checked with current.Sources.
+// current.Style, and a source multi-select pre-checked with current.NewsAggregators.
 // The sources field validates non-empty inline so the user can't save a
 // configuration that would trigger the next-run "sources is empty" warning.
 //

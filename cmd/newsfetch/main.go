@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -139,6 +140,15 @@ func runSettings(out io.Writer) error {
 			if err != nil {
 				return onboard.Answers{}, err
 			}
+			// Validated (warnings discarded) so the answers reflect the
+			// EFFECTIVE config the program actually runs on, not raw decode
+			// output. config.Load alone can leave a per-feed max_items/weight
+			// the user typed as 0 encoded as config's internal -1 "explicit
+			// zero" sentinel (see config.explicitZeroMarker); Validate is
+			// what resolves that sentinel into either a clamped valid value
+			// or "no override", same as the render and refresh paths already
+			// do. Same io.Discard precedent as runRefresh.
+			cfg = config.Validate(cfg, config.FieldSources{}, io.Discard)
 			return settingsAnswers(cfg), nil
 		},
 		Answers: pickSettingsAnswerSource(os.Stdin),
@@ -163,11 +173,21 @@ func settingsAnswers(cfg config.Config) onboard.Answers {
 	var feeds []onboard.Feed
 	for _, f := range cfg.Following.Feeds {
 		of := onboard.Feed{URL: f.URL}
-		if f.MaxItems != 0 {
+		// Any non-positive value is treated as unset, not just exact zero.
+		// config.Load can hand back its internal -1 "explicit zero" sentinel
+		// (config.explicitZeroMarker) for a max_items/weight the user typed
+		// as 0, when it is not followed by config.Validate to resolve that
+		// sentinel away — Current now always validates first, but testing
+		// != 0 here would still read a raw -1 as a genuine user value and
+		// leak it into the rewritten file for any caller that doesn't. NaN
+		// is deliberately left "set" (not caught by > 0, so carved back in)
+		// so it still reaches tomlFloat's own non-finite guard rather than
+		// being silently reclassified here.
+		if f.MaxItems > 0 {
 			n := f.MaxItems
 			of.MaxItems = &n
 		}
-		if f.Weight != 0 {
+		if f.Weight > 0 || math.IsNaN(f.Weight) {
 			w := f.Weight
 			of.Weight = &w
 		}
