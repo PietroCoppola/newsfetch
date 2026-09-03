@@ -85,7 +85,8 @@ Subcommands:
 
 `newsfetch --uninstall` always removes the shell rc block first. Safe to
 re-run — a missing rc file or an already-removed block prints a one-line
-"nothing to remove" and stops there.
+"nothing to remove" and the run carries on to the files below, so a second
+`--uninstall` still offers whatever the first one left in place.
 
 What happens to the files it created next depends on whether stdin is a
 terminal:
@@ -147,7 +148,7 @@ in real time — so only a human answering a prompt can remove it.
 | `following.feeds` | `[table]` | `[]` | RSS/Atom feeds for the following pool, one `[[following.feeds]]` table each. Keys: `url` (required, `http`/`https`), `max_items` (`1..10`, default `3`), `weight` (`(0.0, 5.0]`, replaces the automatic cadence weight). Removing `following` from `pools` leaves these blocks untouched. A `url` listed more than once is dropped back to a single entry with a warning, so one feed is never fetched or rendered twice; the JSON surfaces reject the repeat outright. |
 | `count` | `int` | `1` | Stories rendered per invocation from the **news** pool. Range `1..4`. Out-of-range values are clamped with a one-line warning at next render. |
 | `following_count` | `int` | `1` | Same, for the **following** pool. Range `1..4`. No CLI flag — `--count` is the news pool's knob. |
-| `ticker_marker` | `string` | `"dot"` | Symbol prefixing each non-hero story when more than one renders. One of `dot`, `arrow`, `branch`. Visible only when `style = "boxed"` and `count > 1`. |
+| `ticker_marker` | `string` | `"dot"` | Symbol prefixing each non-hero story when more than one renders. One of `dot`, `arrow`, `branch`. Applies under `style = "boxed"` to any pool rendering more than one story, so it is live as soon as `count` **or** `following_count` exceeds 1 — the wizard offers both ticker pickers on that same rule. |
 | `ticker_boxed` | `bool` | `false` | `true` wraps hero plus ticker in one outer box; `false` gives the hero its own box with ticker lines beneath. Same visibility rule as `ticker_marker`. |
 | `cache_ttl_minutes` | `int` | `30` | Stale-while-revalidate window for the story cache. Floor of 5 minutes. |
 | `dedup_ttl_hours` | `int` | `6` | Window during which a rendered story is filtered out of the candidate pool. After the window passes, the story ages back in and can re-appear. Set to `0` to disable dedup entirely. |
