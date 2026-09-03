@@ -1204,11 +1204,12 @@ weight = nan
 // produced.
 //
 // settingsAnswers is called directly on the UNVALIDATED config.Load output
-// (no config.Validate in between) on purpose: Current now always validates
-// first, but settingsAnswers's own guard must be correct independent of
-// that — "guard regardless" — so this test exercises exactly the call
-// sequence that leaked the sentinel before this fix:
-// config.Load -> settingsAnswers -> OverwriteConfig.
+// because that is production's own sequence, not a shortcut taken by the
+// test: settingsCurrent deliberately skips config.Validate so a feed with an
+// unparseable URL is not deleted from the user's file, which
+// TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated pins. Nothing clamps
+// the sentinel before the projection sees it, so this guard is the only one
+// standing in the path config.Load -> settingsAnswers -> OverwriteConfig.
 func TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk(t *testing.T) {
 	const fixture = `topics = ["rust"]
 style = "boxed"
