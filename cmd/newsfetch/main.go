@@ -630,7 +630,9 @@ Subcommands:
                        "news": {"aggregators": ["hackernews"]}}
                       topics, style, pools, count required; everything
                       else optional and preserved from current config
-  --uninstall       remove the newsfetch block from your shell rc
+  --uninstall       remove shell rc block, config, and caches (see README);
+                    interactive: asks per group; piped: no prompt, keeps
+                    dedup/session/feed state and prints where
 
   --version         print version and exit
   --help            print usage and exit

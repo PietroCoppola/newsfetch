@@ -56,7 +56,7 @@ Walks you through picking topics and a display style, writes the config to
 bash, or fish) so a story renders on each new terminal.
 
 - `newsfetch --settings` — edit your config later (topics, style, pools, feeds, counts, ticker).
-- `newsfetch --uninstall` — remove the shell hook.
+- `newsfetch --uninstall` — remove the shell hook, config, and caches (see [below](#uninstall)).
 
 ## Flags
 
@@ -75,11 +75,41 @@ untouched):
 Subcommands:
   --init            interactive setup
   --settings        edit existing config (topics, style, pools, feeds, counts, ticker)
-  --uninstall       remove the shell hook
+  --uninstall       remove the shell hook, config, and caches — see below
 
   --version
   --help
 ```
+
+## Uninstall
+
+`newsfetch --uninstall` always removes the shell rc block first. Safe to
+re-run — a missing rc file or an already-removed block prints a one-line
+"nothing to remove" and stops there.
+
+What happens to the files it created next depends on whether stdin is a
+terminal:
+
+- **Interactive** (stdin is a real terminal): asks once per group, and
+  only for a group that has something on disk to remove.
+  - **config** — `config.toml`
+  - **caches** — `feed.json`, `following.json`, `refresh.log`,
+    `refresh.lock`; all rebuildable by one fetch
+  - **state** — `seen.json` (dedup history), `sessions.json` (statusline
+    session pins), `feeds.json` (up to four weeks of following-feed
+    cadence and HTTP-conditional-GET data) — offered only in this mode
+
+  Declining a group leaves its files in place and prints their paths.
+- **Piped** (stdin is not a TTY — a script, or any non-interactive
+  invocation): removes config and caches **without asking**. It
+  deliberately never removes, and never even asks about, state — that
+  group is left off the roster entirely — and instead prints the
+  directory it was kept in.
+
+The asymmetry is intentional: config is a minute of retyping and caches
+rebuild themselves on the next fetch, so a piped run is allowed to clear
+them on its own judgment. State can't be rebuilt — it has to be re-earned
+in real time — so only a human answering a prompt can remove it.
 
 ## Notes
 
