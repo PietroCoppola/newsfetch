@@ -140,15 +140,24 @@ func runSettings(out io.Writer) error {
 			if err != nil {
 				return onboard.Answers{}, err
 			}
-			// Validated (warnings discarded) so the answers reflect the
-			// EFFECTIVE config the program actually runs on, not raw decode
-			// output. config.Load alone can leave a per-feed max_items/weight
-			// the user typed as 0 encoded as config's internal -1 "explicit
-			// zero" sentinel (see config.explicitZeroMarker); Validate is
-			// what resolves that sentinel into either a clamped valid value
-			// or "no override", same as the render and refresh paths already
-			// do. Same io.Discard precedent as runRefresh.
-			cfg = config.Validate(cfg, config.FieldSources{}, io.Discard)
+			// Deliberately NOT config.Validate'd. Validate treats a feed
+			// with an unparseable, relative, or non-http(s) URL as unusable
+			// and drops it (splitFeeds in internal/config/validate.go), a
+			// rule that exists to keep bad feeds off the render/fetch path.
+			// But OverwriteConfig regenerates the ENTIRE file from Answers,
+			// so validating here would make the very next `--settings` save
+			// silently delete that feed's line from config.toml — the URL
+			// is the one part of a feed entry a user cannot get back,
+			// unlike an out-of-range max_items/weight, which is just a
+			// clamped number. A user who mistypes a URL currently sees a
+			// per-render warning and can fix the character; validating in
+			// Current would instead erase the line the first time they save
+			// settings for any unrelated reason. settingsAnswers's own
+			// guard (see below) is what keeps the OTHER end of this path
+			// safe — config.Load's internal "explicit zero" sentinel for a
+			// typed max_items=0/weight=0 — without paying that price. See
+			// TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated in
+			// main_test.go, which pins this decision.
 			return settingsAnswers(cfg), nil
 		},
 		Answers: pickSettingsAnswerSource(os.Stdin),
@@ -174,15 +183,16 @@ func settingsAnswers(cfg config.Config) onboard.Answers {
 	for _, f := range cfg.Following.Feeds {
 		of := onboard.Feed{URL: f.URL}
 		// Any non-positive value is treated as unset, not just exact zero.
-		// config.Load can hand back its internal -1 "explicit zero" sentinel
+		// config.Load hands back its internal -1 "explicit zero" sentinel
 		// (config.explicitZeroMarker) for a max_items/weight the user typed
-		// as 0, when it is not followed by config.Validate to resolve that
-		// sentinel away — Current now always validates first, but testing
-		// != 0 here would still read a raw -1 as a genuine user value and
-		// leak it into the rewritten file for any caller that doesn't. NaN
-		// is deliberately left "set" (not caught by > 0, so carved back in)
-		// so it still reaches tomlFloat's own non-finite guard rather than
-		// being silently reclassified here.
+		// as 0 — Current deliberately does NOT run config.Validate (see its
+		// comment: validating there would delete feeds with a bad URL, not
+		// just clamp numbers), so this guard is the only thing standing
+		// between that raw -1 and the rewritten file. Testing != 0 would
+		// read -1 as a genuine user value and leak it out as "max_items = -1"
+		// / "weight = -1.0". NaN is deliberately left "set" (not caught by
+		// > 0, so carved back in) so it still reaches tomlFloat's own
+		// non-finite guard rather than being silently reclassified here.
 		if f.MaxItems > 0 {
 			n := f.MaxItems
 			of.MaxItems = &n

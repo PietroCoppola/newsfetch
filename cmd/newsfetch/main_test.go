@@ -1265,3 +1265,78 @@ weight = 2.5
 		t.Errorf("Following.Feeds = %+v, want %+v", back.Following.Feeds, want)
 	}
 }
+
+// TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated pins fix round 2's
+// reversal of fix round 1: runSettings's Current closure must NOT run the
+// loaded config through config.Validate before projecting it into Answers.
+//
+// Fix round 1 added that Validate call to resolve config.Load's internal
+// "explicit zero" sentinel (see TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk
+// above) into a real value. That traded a bounded numeric corruption for a
+// worse bug: config.Validate's splitFeeds drops any feed whose URL is
+// unparseable, relative, or missing a supported scheme (see
+// internal/config/validate.go's feedURLProblem) — meant to keep unusable
+// feeds off the render/fetch path. But OverwriteConfig regenerates the
+// ENTIRE config file from Answers, so validating in Current would make the
+// very next `--settings` save silently DELETE that feed's line, with no
+// warning (the writer is discarded). A mistyped URL is the one part of a
+// feed entry a user cannot reconstruct from memory, unlike an out-of-range
+// max_items/weight, which is just a number Validate would clamp back into
+// range. A user who mistypes a URL today sees a per-render warning and can
+// go fix the character; they must not lose the line entirely just because
+// they ran --settings for something unrelated.
+//
+// If a future change reintroduces config.Validate on this path, this test
+// is what should catch it: the round trip must be byte-identical, invalid
+// URL included.
+func TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated(t *testing.T) {
+	const fixture = `# newsfetch config. Edit freely; see spec.md for field meanings.
+
+topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+pool_order = ["following", "news"]
+count = 1
+following_count = 1
+ticker_marker = "dot"
+ticker_boxed = false
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "example.com/feed.xml"
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if len(cfg.Following.Feeds) != 1 || cfg.Following.Feeds[0].URL != "example.com/feed.xml" {
+		t.Fatalf("fixture did not decode the invalid-URL feed as loaded: %+v", cfg.Following.Feeds)
+	}
+	// Prove the premise: this URL is exactly the shape config.Validate
+	// drops. Without this, the test would not demonstrate why Current must
+	// skip Validate, only that it happens to.
+	validated := config.Validate(cfg, config.FieldSources{}, io.Discard)
+	if len(validated.Following.Feeds) != 0 {
+		t.Fatalf("fixture URL no longer trips config.Validate's feed-drop rule, test no longer proves anything: %+v", validated.Following.Feeds)
+	}
+	// The actual settings flow: config.Load -> settingsAnswers, with no
+	// config.Validate in between, exactly as Current does it.
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, settingsAnswers(cfg)); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if string(got) != fixture {
+		t.Errorf("a --settings round trip must not delete a feed with an invalid URL\n--- got ---\n%s\n--- want (byte-identical) ---\n%s", got, fixture)
+	}
+}
