@@ -184,38 +184,50 @@ func settingsCurrent(path string) (onboard.Answers, error) {
 //
 // The MaxItems/Weight pointers are what carry "the user never set this"
 // across the gap between the two representations: config uses a zero value
-// for unset, Answers uses a nil pointer, so zero maps to nil and everything
-// else to an address. An empty feed list maps to nil rather than an empty
+// for unset, Answers uses a nil pointer. Weight maps zero to nil and
+// everything else to an address; MaxItems additionally substitutes
+// config.Load's internal explicit-zero sentinel with an address of
+// defaults.MinFeedItems rather than nil, since a genuinely absent key and a
+// typed zero resolve to different values once reloaded (see the per-field
+// comment below). An empty feed list maps to nil rather than an empty
 // slice so the writer's nil-means-omit convention sees what it expects.
 func settingsAnswers(cfg config.Config) onboard.Answers {
 	var feeds []onboard.Feed
 	for _, f := range cfg.Following.Feeds {
 		of := onboard.Feed{URL: f.URL}
-		// Any non-positive value is treated as unset, not just exact zero.
-		// config.Load hands back its internal -1 "explicit zero" sentinel
-		// (config.explicitZeroMarker) for a max_items/weight the user typed
-		// as 0 — Current deliberately does NOT run config.Validate (see its
-		// comment: validating there would delete feeds with a bad URL, not
-		// just clamp numbers), so this guard is the only thing standing
-		// between that raw -1 and the rewritten file. Testing != 0 would
-		// read -1 as a genuine user value and leak it out as "max_items = -1"
-		// / "weight = -1.0". NaN is deliberately left "set" (not caught by
-		// > 0, so carved back in) so it still reaches tomlFloat's own
-		// non-finite guard rather than being silently reclassified here.
+		// The rule: preserve what the user wrote when it can be
+		// represented, substitute only when it cannot.
 		//
-		// The two knobs are guarded identically here but do not resolve
-		// identically once omitted: for weight, "unset" and what
-		// config.Validate would have clamped an explicit 0 to (see
-		// clampFeedWeight) are the same value, 0, so nothing is lost. For
-		// max_items they are not — Validate clamps an explicit 0 up to
-		// MinFeedItems (1), but omitting the key here makes the rewritten
-		// file's reload see it as genuinely unset, which resolves to the
-		// documented default of 3 (defaults.DefaultFeedMaxItems) instead.
-		// Accepted behaviour, not a bug: it just is not uniform.
-		if f.MaxItems > 0 {
+		// config.Load hands back its internal -1 "explicit zero" sentinel
+		// (config.explicitZeroMarker) for a max_items the user typed as 0
+		// — Current deliberately does NOT run config.Validate (see its
+		// comment: validating there would delete feeds with a bad URL, not
+		// just clamp numbers), so this switch is the only thing standing
+		// between that raw -1 and the rewritten file. A typed zero cannot
+		// be represented (FeedConfig reserves 0 itself for "absent"), so it
+		// is substituted with defaults.MinFeedItems — the value
+		// config.Validate actually clamps an explicit zero to, and so the
+		// value the program has been running that feed with all along.
+		// Omitting the key instead, as an earlier round did, would read
+		// back as genuinely unset and silently jump the effective cap to
+		// defaults.DefaultFeedMaxItems (3) on the next --settings save. A
+		// positive value, in range or not, CAN be represented, so it
+		// round-trips exactly — an out-of-range value like 99 stays 99, and
+		// the user keeps getting the warning that tells them to fix it.
+		switch {
+		case f.MaxItems > 0:
 			n := f.MaxItems
 			of.MaxItems = &n
+		case f.MaxItems < 0:
+			n := defaults.MinFeedItems
+			of.MaxItems = &n
 		}
+		// Weight has no equivalent substitution: "unset" and what
+		// config.Validate clamps an explicit 0 to (see clampFeedWeight)
+		// are the same value, 0, so omitting the key here loses nothing.
+		// NaN is deliberately left "set" (not caught by > 0, so carved
+		// back in) so it still reaches tomlFloat's own non-finite guard
+		// rather than being silently reclassified here.
 		if f.Weight > 0 || math.IsNaN(f.Weight) {
 			w := f.Weight
 			of.Weight = &w

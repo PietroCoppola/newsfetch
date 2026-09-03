@@ -1193,11 +1193,32 @@ weight = nan
 	}
 }
 
-// TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk pins the fix
-// round 1 bug: config.Load encodes a max_items/weight the user typed as
+// TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk pins fix round
+// 3's correction: config.Load encodes a max_items/weight the user typed as
 // literal 0 as the internal -1 "explicit zero" sentinel (see
 // config.explicitZeroMarker) so config.Validate can tell that apart from an
-// absent key. Every existing "unset" case up to this point constructed
+// absent key. Rounds 1 and 2 both had settingsAnswers drop that sentinel to
+// "unset" on projection — round 1 got there by validating first (reverted,
+// see TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated), round 2 by
+// treating any non-positive value as absent. Both silently moved the feed's
+// effective max_items cap from 1 (what config.Validate actually clamps an
+// explicit zero to, since defaults.MinFeedItems is 1) up to 3 (the
+// documented default for a genuinely absent key) the moment a user ran
+// --settings for anything unrelated, and the per-render out-of-range
+// warning stopped along with it.
+//
+// The corrected rule: preserve what the user wrote when it can be
+// represented, substitute only when it cannot. Zero cannot be represented
+// (FeedConfig reserves 0 for "absent"), so settingsAnswers now writes
+// defaults.MinFeedItems in its place — the value the program actually runs
+// with today — instead of omitting the key. An absent key stays absent. A
+// positive but out-of-range value (this fixture's fourth feed) CAN be
+// represented, so it round-trips unchanged and the user keeps seeing the
+// warning that tells them to fix it. Weight is untouched by any of this:
+// for weight, "unset" and what Validate clamps an explicit zero to are the
+// same value (0), so omission was always exact.
+//
+// Every existing "unset" case up to this point constructed
 // config.FeedConfig directly in Go, which produces a real zero and never
 // exercises the sentinel — this test instead seeds an actual config FILE and
 // decodes it through config.Load, the only place the sentinel is ever
@@ -1232,6 +1253,10 @@ url = "https://a.example/absent"
 url = "https://a.example/valid"
 max_items = 5
 weight = 2.5
+
+[[following.feeds]]
+url = "https://a.example/out-of-range"
+max_items = 99
 `
 	dir := t.TempDir()
 	src := filepath.Join(dir, "config.toml")
@@ -1264,9 +1289,10 @@ weight = 2.5
 		t.Fatalf("rewritten config no longer loads: %v", err)
 	}
 	want := []config.FeedConfig{
-		{URL: "https://a.example/explicit-zero"},
+		{URL: "https://a.example/explicit-zero", MaxItems: 1},
 		{URL: "https://a.example/absent"},
 		{URL: "https://a.example/valid", MaxItems: 5, Weight: 2.5},
+		{URL: "https://a.example/out-of-range", MaxItems: 99},
 	}
 	if !reflect.DeepEqual(back.Following.Feeds, want) {
 		t.Errorf("Following.Feeds = %+v, want %+v", back.Following.Feeds, want)
