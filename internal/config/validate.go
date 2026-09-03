@@ -23,22 +23,35 @@ type FieldSources struct {
 	Count string
 }
 
-// MinCacheTTLMinutes, MinPointsFloor and MinDedupTTLHours are the validation
-// floors for the three advanced config knobs, spelled in the units the
-// config file uses. They live here (not in internal/defaults) because they
-// are a validation concern — every default sits comfortably inside them, and
-// a floor only matters once a user types a value.
+// MinCacheTTLMinutes, MinPointsFloor, MinDedupTTLHours, MaxCacheTTLMinutes
+// and MaxDedupTTLHours are the validation bounds for the advanced config
+// knobs, spelled in the units the config file uses. They live here (not in
+// internal/defaults) because they are a validation concern — every default
+// sits comfortably inside them, and a bound only matters once a user types a
+// value.
 //
 // Exported because the TOML path is not the only one that has to honour
 // them: the scripted --init/--settings JSON readers reject what this package
-// clamps, and they must reject it at exactly these numbers. A floor spelled
-// twice is a floor that drifts, and the two halves disagreeing is how an
+// clamps, and they must reject it at exactly these numbers. A bound spelled
+// twice is a bound that drifts, and the two halves disagreeing is how an
 // invalid value gets written to a config file that Validate then only ever
 // repairs in memory.
+//
+// MaxCacheTTLMinutes and MaxDedupTTLHours exist because Load multiplies the
+// raw config int by time.Minute / time.Hour to build a time.Duration — a
+// signed 64-bit count of nanoseconds. One minute or hour past either bound
+// overflows that multiplication negative, and the floor above then clamps
+// the result to the minimum: the user gets a value they never typed, from
+// input this package's own floor check accepted. Derived from math.MaxInt64
+// rather than pasted as a literal so the bound cannot drift from the
+// language's own limit; min_points has no such bound because Load never
+// multiplies it.
 const (
 	MinCacheTTLMinutes = 5
 	MinPointsFloor     = 0
 	MinDedupTTLHours   = 0
+	MaxCacheTTLMinutes = int(math.MaxInt64 / int64(time.Minute))
+	MaxDedupTTLHours   = int(math.MaxInt64 / int64(time.Hour))
 )
 
 // minCacheTTL is MinCacheTTLMinutes as a Duration, which is what Config

@@ -568,12 +568,22 @@ func TestReadInitJSON_AdvancedKnobsValidated(t *testing.T) {
 		{"cache ttl one below floor", `{"topics":[],"style":"boxed","cache_ttl_minutes":4}`, "cache_ttl_minutes"},
 		{"cache ttl at floor", `{"topics":[],"style":"boxed","cache_ttl_minutes":5}`, ""},
 		{"cache ttl above floor", `{"topics":[],"style":"boxed","cache_ttl_minutes":6}`, ""},
+		// 153722867 minutes is the largest value that survives Load's
+		// cache_ttl_minutes*time.Minute multiplication inside a signed
+		// 64-bit nanosecond Duration; one more overflows negative and would
+		// be silently clamped to the floor on the next load.
+		{"cache ttl at max", `{"topics":[],"style":"boxed","cache_ttl_minutes":153722867}`, ""},
+		{"cache ttl over max", `{"topics":[],"style":"boxed","cache_ttl_minutes":153722868}`, "cache_ttl_minutes"},
 		{"min points negative", `{"topics":[],"style":"boxed","min_points":-1}`, "min_points"},
 		{"min points at floor", `{"topics":[],"style":"boxed","min_points":0}`, ""},
 		{"min points above floor", `{"topics":[],"style":"boxed","min_points":1}`, ""},
 		{"dedup ttl negative", `{"topics":[],"style":"boxed","dedup_ttl_hours":-1}`, "dedup_ttl_hours"},
 		{"dedup ttl at floor", `{"topics":[],"style":"boxed","dedup_ttl_hours":0}`, ""},
 		{"dedup ttl above floor", `{"topics":[],"style":"boxed","dedup_ttl_hours":1}`, ""},
+		// 2562047 hours is the largest value that survives Load's
+		// dedup_ttl_hours*time.Hour multiplication the same way.
+		{"dedup ttl at max", `{"topics":[],"style":"boxed","dedup_ttl_hours":2562047}`, ""},
+		{"dedup ttl over max", `{"topics":[],"style":"boxed","dedup_ttl_hours":2562048}`, "dedup_ttl_hours"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

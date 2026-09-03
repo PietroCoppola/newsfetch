@@ -357,20 +357,28 @@ func validateFollowingCount(flag string, n int) error {
 }
 
 // validateCacheTTLMinutes, validateMinPoints and validateDedupTTLHours
-// reject the three wizard-hidden knobs when they fall below the floors
-// config.Validate enforces on a TOML file. The floors come from
+// reject the three wizard-hidden knobs when they fall outside the bounds
+// config.Validate enforces on a TOML file. The bounds come from
 // internal/config rather than being restated here: these values are written
 // straight to config.toml by OverwriteConfig, and Validate's clamp is
 // in-memory only, so a JSON boundary that accepted what the config path
 // rejects would leave the user a file that is wrong on disk forever and
 // warns on every terminal open.
 //
-// Only a floor, no ceiling, because that is what config.Validate checks:
-// there is no upper bound on any of the three, and inventing one here would
-// be the same drift in the other direction.
+// cache_ttl_minutes and dedup_ttl_hours also get a ceiling; min_points does
+// not. config.Load multiplies the first two by time.Minute / time.Hour to
+// build a time.Duration, and a value past config.MaxCacheTTLMinutes /
+// config.MaxDedupTTLHours overflows that multiplication negative — which
+// config.Validate's floor then silently clamps to the minimum on the next
+// load. Rejecting it here is what keeps a value the file-based path cannot
+// represent from ever reaching disk. min_points is never multiplied, so it
+// has no representability limit and keeps its floor-only check.
 func validateCacheTTLMinutes(flag string, n int) error {
 	if n < config.MinCacheTTLMinutes {
 		return fmt.Errorf("%s JSON: cache_ttl_minutes=%d below minimum %d", flag, n, config.MinCacheTTLMinutes)
+	}
+	if n > config.MaxCacheTTLMinutes {
+		return fmt.Errorf("%s JSON: cache_ttl_minutes=%d exceeds maximum %d (overflows on load)", flag, n, config.MaxCacheTTLMinutes)
 	}
 	return nil
 }
@@ -385,6 +393,9 @@ func validateMinPoints(flag string, n int) error {
 func validateDedupTTLHours(flag string, n int) error {
 	if n < config.MinDedupTTLHours {
 		return fmt.Errorf("%s JSON: dedup_ttl_hours=%d below minimum %d (0 disables dedup)", flag, n, config.MinDedupTTLHours)
+	}
+	if n > config.MaxDedupTTLHours {
+		return fmt.Errorf("%s JSON: dedup_ttl_hours=%d exceeds maximum %d (overflows on load)", flag, n, config.MaxDedupTTLHours)
 	}
 	return nil
 }

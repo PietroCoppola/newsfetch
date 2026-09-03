@@ -473,12 +473,22 @@ func TestReadSettingsJSON_AdvancedKnobsValidated(t *testing.T) {
 		{"cache ttl one below floor", head + `"cache_ttl_minutes":4}`, "cache_ttl_minutes"},
 		{"cache ttl at floor", head + `"cache_ttl_minutes":5}`, ""},
 		{"cache ttl above floor", head + `"cache_ttl_minutes":6}`, ""},
+		// 153722867 minutes is the largest value that survives Load's
+		// cache_ttl_minutes*time.Minute multiplication inside a signed
+		// 64-bit nanosecond Duration; one more overflows negative and would
+		// be silently clamped to the floor on the next load.
+		{"cache ttl at max", head + `"cache_ttl_minutes":153722867}`, ""},
+		{"cache ttl over max", head + `"cache_ttl_minutes":153722868}`, "cache_ttl_minutes"},
 		{"min points negative", head + `"min_points":-1}`, "min_points"},
 		{"min points at floor", head + `"min_points":0}`, ""},
 		{"min points above floor", head + `"min_points":1}`, ""},
 		{"dedup ttl negative", head + `"dedup_ttl_hours":-1}`, "dedup_ttl_hours"},
 		{"dedup ttl at floor", head + `"dedup_ttl_hours":0}`, ""},
 		{"dedup ttl above floor", head + `"dedup_ttl_hours":1}`, ""},
+		// 2562047 hours is the largest value that survives Load's
+		// dedup_ttl_hours*time.Hour multiplication the same way.
+		{"dedup ttl at max", head + `"dedup_ttl_hours":2562047}`, ""},
+		{"dedup ttl over max", head + `"dedup_ttl_hours":2562048}`, "dedup_ttl_hours"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
