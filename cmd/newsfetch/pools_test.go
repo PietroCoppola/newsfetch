@@ -396,6 +396,117 @@ func followingStory(id, title, host, feed string, createdAt time.Time) fetch.Sto
 	}
 }
 
+// swapTestUnweightedFeed and swapTestWeightedFeed back
+// TestAssemblePools_CadenceWeightsReachSelection and
+// TestAssemblePools_AggregatorPoolIgnoresFollowingWeights, which share one
+// numeric construction: a story at age 1h (storyU, feed
+// swapTestUnweightedFeed) and one at age 2h (storyW, feed
+// swapTestWeightedFeed). Raw age-based score alone favours storyU by
+// roughly 1.68x; a 5x manual weight on swapTestWeightedFeed (only reachable
+// through poolPick.Weights) reverses that to roughly 4.85x in storyW's
+// favour. Hero selection is weighted-stochastic (rank.pickWeightedIndex), so
+// rand.NewSource(1) is pinned deliberately: both outcomes below were checked
+// against that seed's first draw, which is what makes "which story wins"
+// deterministic rather than merely likely.
+const (
+	swapTestUnweightedFeed = "https://a.example/feed.xml" // poolTestCfg's feed 0; carries no weight entry
+	swapTestWeightedFeed   = "https://b.example/feed.xml" // poolTestCfg's feed 1; gets the 5x manual override
+)
+
+// TestAssemblePools_CadenceWeightsReachSelection pins the wiring at
+// pools.go:208 (assemblePools -> feedWeights -> poolPick.Weights): the
+// per-feed weight map computed for the following pool must actually reach
+// rank.SelectN, not merely exist. The branch's cadence machinery — several
+// hundred lines of computation, plus feedstate's hot-path read — can be
+// disconnected from selection entirely (p.Weights left nil, or feedWeights
+// never called) and every OTHER following-pool test in this file still
+// passes, because none of them picks a winner that depends on weighting.
+// This one does: storyU is younger and wins on raw age-based score alone,
+// but storyW's feed carries a 5x manual override that only a wired weight
+// map can apply — and that override is what makes storyW win instead. If
+// the wiring is severed, storyU wins here too and the test fails.
+func TestAssemblePools_CadenceWeightsReachSelection(t *testing.T) {
+	isolateXDG(t)
+	captureSpawn(t)
+	now := time.Now().UTC()
+
+	storyU := followingStory("u", "Unweighted but newer", "host-u.example", swapTestUnweightedFeed, now.Add(-1*time.Hour))
+	storyW := followingStory("w", "Weighted underdog", "host-w.example", swapTestWeightedFeed, now.Add(-2*time.Hour))
+
+	cfg := poolTestCfg()
+	cfg.Pools = []string{"following"}
+	cfg.PoolOrder = []string{"following"}
+	cfg.FollowingCount = 1
+	cfg.Following.Feeds[1].Weight = 5.0 // feed b (swapTestWeightedFeed) gets the override
+	seedPoolCache(t, "following", now.Add(-time.Minute), []fetch.Story{storyU, storyW})
+
+	pools, _, err := assemblePools(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	if len(pools) != 1 || len(pools[0].Stories) != 1 {
+		t.Fatalf("pools = %+v, want exactly one following story", pools)
+	}
+	if got := pools[0].Stories[0].ID; got != "w" {
+		t.Errorf("selected %q, want %q: the manual weight on its feed did not reach selection "+
+			"(without it, the younger, unweighted story wins on raw score alone)", got, "w")
+	}
+}
+
+// TestAssemblePools_AggregatorPoolIgnoresFollowingWeights pins the
+// invariant poolPick documents at pools.go:30 — "Weights is nil for
+// aggregator pools" — pools must never rank against each other. Nothing
+// currently fails if that is violated. It reuses the exact scenario
+// TestAssemblePools_CadenceWeightsReachSelection pins for the following
+// pool, but seeds the NEWS (aggregator) pool with the same two stories
+// instead. storyW's Feed happens to collide with a key in the following
+// pool's weight map — Story.Feed is a field an aggregator story can
+// structurally carry; nothing on fetch.Story restricts it to the following
+// pool — so if a future change ever wired feedWeights into the news
+// poolPick, storyW would win here exactly as it does in the following-pool
+// test above. Under the correct code the news poolPick never receives a
+// Weights map, so raw age-based score alone decides and the younger storyU
+// wins.
+func TestAssemblePools_AggregatorPoolIgnoresFollowingWeights(t *testing.T) {
+	isolateXDG(t)
+	captureSpawn(t)
+	now := time.Now().UTC()
+
+	storyU := fetch.Story{
+		ID: "u", Title: "Unweighted but newer", URL: "https://host-u.example/x",
+		Source: "hackernews", Feed: swapTestUnweightedFeed,
+		CreatedAt: now.Add(-1 * time.Hour), Tags: []string{},
+	}
+	storyW := fetch.Story{
+		ID: "w", Title: "Weighted underdog", URL: "https://host-w.example/x",
+		Source: "hackernews", Feed: swapTestWeightedFeed,
+		CreatedAt: now.Add(-2 * time.Hour), Tags: []string{},
+	}
+
+	cfg := poolTestCfg()
+	// "following" stays active (in Pools, with its one feed) so
+	// feedWeights(cfg, now) computes the same real 5x-override map as the
+	// following-pool test — even though PoolOrder never processes the
+	// following pool below, which is what isolates this assertion to
+	// whether the map leaks into news, not whether it exists.
+	cfg.Pools = []string{"following", "news"}
+	cfg.PoolOrder = []string{"news"}
+	cfg.Following.Feeds[1].Weight = 5.0
+	seedPoolCache(t, "news", now.Add(-time.Minute), []fetch.Story{storyU, storyW})
+
+	pools, _, err := assemblePools(cfg, map[string]struct{}{}, now, rand.New(rand.NewSource(1)), io.Discard)
+	if err != nil {
+		t.Fatalf("assemblePools: %v", err)
+	}
+	if len(pools) != 1 || len(pools[0].Stories) != 1 {
+		t.Fatalf("pools = %+v, want exactly one news story", pools)
+	}
+	if got := pools[0].Stories[0].ID; got != "u" {
+		t.Errorf("selected %q, want %q: the following pool's weight map reached the news pool's "+
+			"selection (a following-feed-keyed weight reordered an aggregator pool)", got, "u")
+	}
+}
+
 func TestAssemblePools_UsesEachPoolsOwnCount(t *testing.T) {
 	isolateXDG(t)
 	spawns := captureSpawn(t)

@@ -1464,3 +1464,77 @@ func TestRunUninstall_PipedKeepsState(t *testing.T) {
 		t.Errorf("piped uninstall must not print a prompt:\n%s", got)
 	}
 }
+
+// TestStateRemovables_NamesEveryStateFileAndItsLockSidecar pins the
+// contents of stateRemovables, the roster runUninstall hands to
+// UninstallFlow's State group ONLY when stdin is a TTY (runUninstall). No
+// existing test calls stateRemovables directly: TestRunUninstall_PipedKeepsState
+// exercises the piped path, which withholds the State group entirely and so
+// never reaches this function at all. That leaves the roster itself — the
+// list a confirmed interactive uninstall actually deletes — referenced by
+// nothing: it could return an empty slice, drop an entry, or forget an
+// entry's Lock sidecar (leaving an orphaned .lock file behind, or leaving
+// UninstallFlow unable to hold the sidecar across the unlink) and the suite
+// would stay green.
+func TestStateRemovables_NamesEveryStateFileAndItsLockSidecar(t *testing.T) {
+	isolateXDG(t)
+
+	// label -> expected lock sidecar basename, per stateRemovables' doc
+	// comment: seen.json/seen.lock, sessions.json/sessions.lock,
+	// feeds.json/feeds.lock.
+	want := map[string]string{
+		"seen.json":     "seen.lock",
+		"sessions.json": "sessions.lock",
+		"feeds.json":    "feeds.lock",
+	}
+
+	got := stateRemovables()
+	if len(got) != len(want) {
+		t.Fatalf("stateRemovables() returned %d entries, want %d: %+v", len(got), len(want), got)
+	}
+
+	seenLabels := map[string]bool{}
+	for _, r := range got {
+		wantLock, ok := want[r.Label]
+		if !ok {
+			t.Errorf("unexpected entry %q in the uninstall roster", r.Label)
+			continue
+		}
+		if seenLabels[r.Label] {
+			t.Errorf("entry %q appears more than once in the uninstall roster", r.Label)
+		}
+		seenLabels[r.Label] = true
+
+		if r.Path == nil {
+			t.Errorf("%s: Path is nil, so this entry could never be resolved or removed", r.Label)
+			continue
+		}
+		path, err := r.Path()
+		if err != nil {
+			t.Fatalf("%s: Path(): %v", r.Label, err)
+		}
+		if filepath.Base(path) != r.Label {
+			t.Errorf("%s: Path() = %q, want a path ending in %q", r.Label, path, r.Label)
+		}
+
+		if r.Lock == nil {
+			t.Fatalf("%s: Lock is nil — its .lock sidecar would survive an uninstall as an orphan, "+
+				"or UninstallFlow could not hold it across the unlink", r.Label)
+		}
+		lockPath, err := r.Lock()
+		if err != nil {
+			t.Fatalf("%s: Lock(): %v", r.Label, err)
+		}
+		if filepath.Base(lockPath) != wantLock {
+			t.Errorf("%s: Lock() = %q, want a path ending in %q", r.Label, lockPath, wantLock)
+		}
+		if filepath.Dir(lockPath) != filepath.Dir(path) {
+			t.Errorf("%s: lock sidecar %q is not beside the state file %q", r.Label, lockPath, path)
+		}
+	}
+	for label := range want {
+		if !seenLabels[label] {
+			t.Errorf("uninstall roster is missing %q", label)
+		}
+	}
+}
