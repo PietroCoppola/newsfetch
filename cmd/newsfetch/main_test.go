@@ -1504,6 +1504,156 @@ func TestRunUninstall_PipedKeepsState(t *testing.T) {
 	}
 }
 
+// TestRunUninstall_RerunAsksNothingAboutSurvivingLocks pins the situation a
+// user actually meets, not a synthetic stand-in for it: run --uninstall to
+// completion, then run it again. A confirmed run empties the state group's
+// data files but never unlinks a lock sidecar (that is the whole point of
+// the previous fix round — see stateRemovables and removeEntry) so the
+// second run starts with three lock files on disk and nothing else. It
+// must not prompt about state again — the presence check that landed with
+// that fix counts a data file, not its sidecar, so a lone lock is not
+// present — and it must not describe those surviving locks as something
+// removable: printKeptLocks' "kept" framing has to be the only thing said
+// about them, never maybeRemoveGroup's "left in place (rm to remove)",
+// which is what a present-but-declined entry gets.
+//
+// TestUninstallFlow_OrphanedLockIsNotPresent already pins the presence
+// check in isolation, by planting one orphaned lock by hand. This test is
+// not a duplicate of it: it reaches the same state through two real
+// UninstallFlow calls against one on-disk tree, so it also exercises
+// whatever the first run's confirmed removal actually leaves behind — all
+// three state locks, not one placed directly — and it pins the second
+// run's OUTPUT (the printKeptLocks wording), which the flow-level test
+// cannot reach because printKeptLocks lives in this package, not onboard.
+//
+// runUninstall's own TTY branch cannot be driven from a test — term.IsTerminal
+// needs a real terminal, and neither a pipe nor a redirected file is one —
+// so this calls the same two functions runUninstall calls on the
+// interactive path (onboard.UninstallFlow with the State group populated,
+// then printKeptLocks) directly, against paths built from the production
+// roster functions, rather than going through runUninstall itself.
+func TestRunUninstall_RerunAsksNothingAboutSurvivingLocks(t *testing.T) {
+	isolateXDG(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	cfgPath, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	newsCache, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(news): %v", err)
+	}
+	followingCache, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(following): %v", err)
+	}
+	cacheDir, err := cache.Dir()
+	if err != nil {
+		t.Fatalf("cache.Dir: %v", err)
+	}
+	logPath, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	seenPath, err := history.Path()
+	if err != nil {
+		t.Fatalf("history.Path: %v", err)
+	}
+	sessionsPath, err := session.Path()
+	if err != nil {
+		t.Fatalf("session.Path: %v", err)
+	}
+	feedsPath, err := feedstate.Path()
+	if err != nil {
+		t.Fatalf("feedstate.Path: %v", err)
+	}
+	stateDir := filepath.Dir(seenPath)
+
+	dataFiles := []string{cfgPath, newsCache, followingCache, logPath, seenPath, sessionsPath, feedsPath}
+	locks := []string{
+		filepath.Join(cacheDir, "refresh.lock"),
+		filepath.Join(stateDir, "seen.lock"),
+		filepath.Join(stateDir, "sessions.lock"),
+		filepath.Join(stateDir, "feeds.lock"),
+	}
+	for _, p := range append(append([]string{}, dataFiles...), locks...) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newDeps := func(out io.Writer, confirm func(string) bool) onboard.UninstallDeps {
+		return onboard.UninstallDeps{
+			Shell:   onboard.Detect,
+			Out:     out,
+			Confirm: confirm,
+			Config:  onboard.Removable{Label: "config.toml", Path: config.Path},
+			Caches:  cacheRemovables(),
+			State:   stateRemovables(),
+		}
+	}
+
+	// First run: the interactive shape, confirmed yes to every group.
+	firstOut := &bytes.Buffer{}
+	if err := onboard.UninstallFlow(newDeps(firstOut, func(string) bool { return true })); err != nil {
+		t.Fatalf("first UninstallFlow: %v", err)
+	}
+	printKeptLocks(firstOut)
+
+	// Guard the guard: the second run's "nothing to ask" only means
+	// something if the first run actually did what the rest of this suite
+	// already pins — data gone, locks surviving — rather than the fixture
+	// starting that way by accident.
+	for _, p := range dataFiles {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("fixture problem: %s should have been removed by the first run", p)
+		}
+	}
+	for _, p := range locks {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("fixture problem: lock %s should survive the first run: %v", p, err)
+		}
+	}
+
+	// Second run: nothing but the four lock files remains on disk.
+	prompts := 0
+	var prompted []string
+	secondOut := &bytes.Buffer{}
+	if err := onboard.UninstallFlow(newDeps(secondOut, func(prompt string) bool {
+		prompts++
+		prompted = append(prompted, prompt)
+		return true
+	})); err != nil {
+		t.Fatalf("second UninstallFlow: %v", err)
+	}
+	printKeptLocks(secondOut)
+
+	if prompts != 0 {
+		t.Errorf("second run asked %d prompt(s) %v, want 0: every group's data files are already gone, and a surviving lock must not count as something present to ask about", prompts, prompted)
+	}
+	got := secondOut.String()
+	if strings.Contains(got, "left in place") {
+		t.Errorf("second run's output reads as if something were present and declined, but nothing was even asked about:\n%s", got)
+	}
+	for _, p := range locks {
+		if !strings.Contains(got, p) {
+			t.Errorf("second run should still name surviving lock %s in the kept-locks notice:\n%s", p, got)
+		}
+	}
+	if !strings.Contains(got, "lock files kept") {
+		t.Errorf("second run's output should carry the kept-locks notice, not describe the locks as removable:\n%s", got)
+	}
+	for _, p := range locks {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("lock %s must still survive after the second run: %v", p, err)
+		}
+	}
+}
+
 // TestCacheRemovables_ExcludesLockFiles pins refresh.lock's removal from
 // the cache roster. It was listed there because a bare lock file left
 // behind in an otherwise empty directory reads as litter — but it is the
