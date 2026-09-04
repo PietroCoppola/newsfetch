@@ -3,21 +3,31 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/PietroCoppola/newsfetch/internal/cache"
+	"github.com/PietroCoppola/newsfetch/internal/config"
 	"github.com/PietroCoppola/newsfetch/internal/defaults"
+	"github.com/PietroCoppola/newsfetch/internal/feedstate"
 	"github.com/PietroCoppola/newsfetch/internal/fetch"
+	"github.com/PietroCoppola/newsfetch/internal/history"
 	"github.com/PietroCoppola/newsfetch/internal/lockfile"
+	"github.com/PietroCoppola/newsfetch/internal/onboard"
+	"github.com/PietroCoppola/newsfetch/internal/refreshlog"
+	"github.com/PietroCoppola/newsfetch/internal/render"
+	"github.com/PietroCoppola/newsfetch/internal/session"
 )
 
 // isolateXDG points every XDG root (and HOME, which the XDG fallbacks
@@ -135,32 +145,6 @@ func TestParseAndLoad_NegativeMaxWidthMeansAuto(t *testing.T) {
 	}
 	if cli.maxWidth != 0 {
 		t.Errorf("maxWidth = %d, want 0 (auto)", cli.maxWidth)
-	}
-}
-
-func TestFallbackMessage_SingleSourceNamed(t *testing.T) {
-	got := fallbackMessage([]string{"lobsters"})
-	if !strings.Contains(got, "lobsters") {
-		t.Errorf("single-source fallback should name the source; got %q", got)
-	}
-	if !strings.Contains(got, "check your connection") {
-		t.Errorf("fallback should keep the connection hint; got %q", got)
-	}
-}
-
-func TestFallbackMessage_MultiSourceGeneric(t *testing.T) {
-	got := fallbackMessage([]string{"hackernews", "lobsters"})
-	if got != defaults.FallbackMessage {
-		t.Errorf("multi-source fallback = %q, want default %q", got, defaults.FallbackMessage)
-	}
-}
-
-func TestFallbackMessage_NoSourcesGeneric(t *testing.T) {
-	// Defence-in-depth: cfg.Sources should never be empty post-Validate,
-	// but if it ever is, the generic message is the safe choice.
-	got := fallbackMessage(nil)
-	if got != defaults.FallbackMessage {
-		t.Errorf("nil-sources fallback = %q, want default", got)
 	}
 }
 
@@ -412,18 +396,1374 @@ func TestRunDefault_StyleJSON_WithInvalidConfig_StdoutIsCleanJSON(t *testing.T) 
 	if err := runDefault(&stdout, &stderr, []string{"--style=json"}, rng); err != nil {
 		t.Fatalf("runDefault: %v", err)
 	}
-	// stdout must be parseable JSON despite the broken config.
-	var payload map[string]any
+	// R-3: --style=json is a uniform top-level ARRAY with a pool field on
+	// every object. The bare-object-at-count-1 shape this test used to
+	// assert was removed deliberately.
+	var payload []map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("stdout not parseable JSON: %v\nstdout: %q\nstderr: %q", err, stdout.String(), stderr.String())
+		t.Fatalf("stdout not a parseable JSON array: %v\nstdout: %q\nstderr: %q", err, stdout.String(), stderr.String())
 	}
-	for _, key := range []string{"title", "url", "source", "age_seconds", "tags"} {
-		if _, ok := payload[key]; !ok {
+	if len(payload) != 1 {
+		t.Fatalf("got %d elements, want 1 (default count): %s", len(payload), stdout.String())
+	}
+	for _, key := range []string{"title", "url", "source", "age_seconds", "tags", "pool"} {
+		if _, ok := payload[0][key]; !ok {
 			t.Errorf("missing key %q in JSON output: %s", key, stdout.String())
 		}
+	}
+	if payload[0]["pool"] != "news" {
+		t.Errorf("pool = %v, want \"news\"", payload[0]["pool"])
 	}
 	// stderr must carry the one-line warning.
 	if !strings.Contains(stderr.String(), "newsfetch:") {
 		t.Errorf("expected warning on stderr; got %q", stderr.String())
+	}
+}
+
+// writeRefreshConfig writes a config.toml into the isolated
+// XDG_CONFIG_HOME. runRefresh loads its own config from disk — there is no
+// injection seam — so a pool-level test has to go through a real file.
+func writeRefreshConfig(t *testing.T, feedURLs []string, aggregators []string) {
+	t.Helper()
+	path, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	var b strings.Builder
+	pools := `pools = ["news", "following"]`
+	if len(feedURLs) == 0 {
+		pools = `pools = ["news"]`
+	}
+	fmt.Fprintf(&b, "%s\n\n[news]\naggregators = [", pools)
+	for i, a := range aggregators {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", a)
+	}
+	b.WriteString("]\n")
+	for _, u := range feedURLs {
+		fmt.Fprintf(&b, "\n[[following.feeds]]\nurl = %q\n", u)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// failIfFollowingBuilt mirrors the newSource defence the two refresh-lock
+// tests use (main_test.go:189-193): if a regression reaches the following
+// fan-out when it must not, the test fails instead of silently issuing N
+// feed requests. The returned client has no feeds, so FetchFeeds does
+// nothing even if the guard is reached.
+func failIfFollowingBuilt(t *testing.T, why string) {
+	t.Helper()
+	original := newFollowing
+	newFollowing = func(specs []fetch.FeedSpec, validators func(string) (string, string)) *fetch.Following {
+		t.Errorf("runRefresh built the following fan-out (%d feeds) %s", len(specs), why)
+		return &fetch.Following{}
+	}
+	t.Cleanup(func() { newFollowing = original })
+}
+
+// rssServer serves one dated RSS item at /feed.xml, or 500 everywhere when
+// broken is true.
+func rssServer(t *testing.T, broken bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if broken {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<rss version="2.0"><channel><title>T</title>`+
+			`<item><title>Feed story</title><link>https://feed.example.com/one</link>`+
+			`<description>d</description><pubDate>2026-09-01T10:00:00Z</pubDate></item>`+
+			`</channel></rss>`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func brokenAlgoliaStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func readRefreshLog(t *testing.T) string {
+	t.Helper()
+	path, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read refresh log: %v", err)
+	}
+	return string(data)
+}
+
+// TestRunRefresh_HeldLockSkipsEveryPool extends the single-flight guard to
+// the multi-pool body: with the following pool ENABLED in config, a held
+// lock must still build neither a Source nor the feed fan-out. The two
+// pre-existing lock tests run with the default (news-only) config and
+// therefore cannot see a following-pool regression.
+func TestRunRefresh_HeldLockSkipsEveryPool(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, false)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+
+	dir, err := cache.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held, err := lockfile.Acquire(filepath.Join(dir, "refresh.lock"), time.Second)
+	if err != nil {
+		t.Fatalf("test could not take the refresh lock: %v", err)
+	}
+	t.Cleanup(func() { held.Close() })
+
+	original := newSource
+	newSource = func(name string) (fetch.Source, error) {
+		t.Errorf("runRefresh built source %q while another refresh held the lock", name)
+		return nil, fmt.Errorf("source %q must not be built", name)
+	}
+	t.Cleanup(func() { newSource = original })
+	failIfFollowingBuilt(t, "while another refresh held the lock")
+
+	if err := runRefresh(); err != nil {
+		t.Errorf("runRefresh() = %v, want nil (another refresh is already in flight)", err)
+	}
+}
+
+// TestRunRefresh_NewsFailureDoesNotBlockFollowing pins R-29's per-pool
+// isolation in the direction that used to be fatal: before this change a
+// news pool that fetched nothing returned an error and the process exited
+// 1 with the following pool never refreshed.
+func TestRunRefresh_NewsFailureDoesNotBlockFollowing(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, false)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+
+	if err := runRefresh(); err != nil {
+		t.Fatalf("runRefresh() = %v, want nil: the following pool succeeded", err)
+	}
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(newsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("feed.json exists after a failed news fetch (stat err = %v); a failed pool must not write", err)
+	}
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := cache.Read(followingPath)
+	if err != nil {
+		t.Fatalf("following.json should have been written: %v", err)
+	}
+	if len(f.Stories) != 1 || f.Stories[0].URL != "https://feed.example.com/one" {
+		t.Errorf("following.json stories = %+v, want the one fetched feed story", f.Stories)
+	}
+}
+
+// TestRunRefresh_FollowingFailureDoesNotBlockNews is the mirror case: the
+// feed server is down, the aggregator is up, and feed.json must still be
+// written with exit status 0.
+func TestRunRefresh_FollowingFailureDoesNotBlockNews(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, true)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+	swapHNSource(t, algoliaStub().URL)
+
+	if err := runRefresh(); err != nil {
+		t.Fatalf("runRefresh() = %v, want nil: the news pool succeeded", err)
+	}
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := cache.Read(newsPath)
+	if err != nil {
+		t.Fatalf("feed.json should have been written: %v", err)
+	}
+	if len(f.Stories) == 0 {
+		t.Error("feed.json has no stories; the news pool wrote an empty cache")
+	}
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("following.json exists after every feed failed (stat err = %v); a failed pool must not write", err)
+	}
+}
+
+// TestRunRefresh_EveryPoolFailingReturnsError is the other half of the new
+// exit contract: exit 1 now means every enabled pool failed, so this is the
+// only shape that may still return an error.
+func TestRunRefresh_EveryPoolFailingReturnsError(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, true)
+	writeRefreshConfig(t, []string{feeds.URL + "/feed.xml"}, []string{"hackernews"})
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+
+	if err := runRefresh(); err == nil {
+		t.Fatal("runRefresh() = nil with every enabled pool failing, want an error so the process exits 1")
+	}
+}
+
+// TestRunRefresh_LogLinesCarryPoolNamespaces pins R-29/R-30: FetchAll keys
+// its error map by SOURCE NAME and FetchFeeds keys its own by FEED URL, so
+// every line has to say which namespace it came from or the log is
+// ambiguous the moment a feed host is called "hackernews".
+func TestRunRefresh_LogLinesCarryPoolNamespaces(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, true)
+	feedURL := feeds.URL + "/feed.xml"
+	writeRefreshConfig(t, []string{feedURL}, []string{"hackernews"})
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+
+	_ = runRefresh() // both pools fail; the log is what this test reads
+
+	log := readRefreshLog(t)
+	for _, want := range []string{
+		"news hackernews: ",          // per-source failure, news namespace
+		"news: ",                     // the news pool itself fetched nothing
+		"following " + feedURL + ":", // per-feed failure, following namespace
+		"following: ",                // the following pool itself failed
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("refresh.log missing a %q line:\n%s", want, log)
+		}
+	}
+}
+
+// TestRunRefresh_NewsErrorsReachTheLogWithContext pins the error wrapping
+// the global constraints require of refreshNews. Its two failure paths —
+// multiFetch and writeCache — both end up in refresh.log behind
+// runRefresh's "news: " prefix, and an error returned bare from either
+// site names no operation at all: "news: rename temp cache: ..." leaves a
+// reader guessing which file, and multiFetch's raw error leaves them
+// guessing which stage. Both configs here are news-only, so the failing
+// pool is also the only ACTIVE one and runRefresh must return an error.
+func TestRunRefresh_NewsErrorsReachTheLogWithContext(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+		want  string
+	}{
+		{
+			name: "source cannot be built",
+			setup: func(t *testing.T) {
+				original := newSource
+				newSource = func(name string) (fetch.Source, error) {
+					return nil, errors.New("no such source")
+				}
+				t.Cleanup(func() { newSource = original })
+			},
+			want: "news: fetch aggregators: ",
+		},
+		{
+			name: "cache path is occupied by a directory",
+			setup: func(t *testing.T) {
+				srv := algoliaStub()
+				t.Cleanup(srv.Close)
+				swapHNSource(t, srv.URL)
+				path, err := cache.PoolPath("news")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "news: write feed.json: ",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateXDG(t)
+			writeRefreshConfig(t, nil, []string{"hackernews"})
+			tc.setup(t)
+
+			if err := runRefresh(); err == nil {
+				t.Fatal("runRefresh() = nil with the only active pool failing, want an error")
+			}
+			if log := readRefreshLog(t); !strings.Contains(log, tc.want) {
+				t.Errorf("refresh.log missing a %q line:\n%s", tc.want, log)
+			}
+		})
+	}
+}
+
+// writeRefreshConfigExplicitPools writes a config.toml with a caller-chosen
+// pools list, independent of whether news or following actually has
+// content. writeRefreshConfig infers pools from whether feedURLs is empty
+// and so can never express "pool enabled, pool empty" for following (its
+// pools list drops "following" outright when there are no feeds) — exactly
+// the shape the enabled-vs-active tests below need, because that shape is
+// the one PoolEnabled and NewsActive/FollowingActive disagree on.
+func writeRefreshConfigExplicitPools(t *testing.T, pools, feedURLs, aggregators []string) {
+	t.Helper()
+	path, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	quoted := make([]string, len(pools))
+	for i, p := range pools {
+		quoted[i] = fmt.Sprintf("%q", p)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "pools = [%s]\n\n[news]\naggregators = [", strings.Join(quoted, ", "))
+	for i, a := range aggregators {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", a)
+	}
+	b.WriteString("]\n")
+	for _, u := range feedURLs {
+		fmt.Fprintf(&b, "\n[[following.feeds]]\nurl = %q\n", u)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// refreshLogOrEmpty reads refresh.log like readRefreshLog, but a missing
+// file is not a test failure: unlike the existing failure-path tests, the
+// two tests below expect a genuinely quiet run (a skipped pool logs
+// nothing, and the other pool succeeds without a hitch), so refresh.log may
+// never have been created at all when the implementation is correct.
+func refreshLogOrEmpty(t *testing.T) string {
+	t.Helper()
+	path, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("read refresh log: %v", err)
+	}
+	return string(data)
+}
+
+// TestRunRefresh_NewsEnabledButEmptyIsSkippedNotFailed pins the
+// enabled-vs-active distinction at runRefresh's news call site. It is not
+// covered by any earlier test: every prior writeRefreshConfig call gives
+// news a non-empty aggregator list whenever news is enabled, so "enabled"
+// and "active" never diverge for news anywhere else in this file. A
+// regression that swaps cfg.NewsActive() for cfg.PoolEnabled("news") would
+// still see news as enabled here (it IS enabled, just with nothing
+// configured) and would call refreshNews anyway, which returns "all
+// aggregators returned no stories" for a genuinely empty aggregator list —
+// producing a spurious "news: ..." log line for a pool that was never
+// supposed to run at all.
+func TestRunRefresh_NewsEnabledButEmptyIsSkippedNotFailed(t *testing.T) {
+	isolateXDG(t)
+	feeds := rssServer(t, false)
+	writeRefreshConfigExplicitPools(t,
+		[]string{"news", "following"},
+		[]string{feeds.URL + "/feed.xml"},
+		nil, // news enabled, zero aggregators: enabled but not active
+	)
+
+	if err := runRefresh(); err != nil {
+		t.Fatalf("runRefresh() = %v, want nil: following is active and succeeds, news is enabled but has nothing to do", err)
+	}
+
+	followingPath, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(followingPath); err != nil {
+		t.Errorf("following.json should have been written: %v", err)
+	}
+	if log := refreshLogOrEmpty(t); strings.Contains(log, "news") {
+		t.Errorf("refresh.log has a news-pool line for a pool with nothing configured (enabled != active):\n%s", log)
+	}
+}
+
+// TestRunRefresh_FollowingEnabledButEmptyDoesNotMaskNewsFailure pins the
+// enabled-vs-active distinction at runRefresh's FOLLOWING call site.
+//
+// The literal mirror of the news test above — following empty, news
+// enabled and SUCCEEDING — cannot discriminate the
+// cfg.FollowingActive()→cfg.PoolEnabled("following") regression:
+// refreshFollowing carries its own defense-in-depth check
+// (cfg.FollowingActive(), its very first line, there to protect
+// feedstate.Update's garbage-collection — see its doc comment) that no-ops
+// the whole fan-out regardless of which gate runRefresh used to call it. An
+// empty-but-enabled following pool stays silent either way as long as
+// nothing else is failing, so that shape was tried, observed to still PASS
+// under the mutation below, and dropped rather than committed as a false
+// regression pin.
+//
+// The distinction only becomes externally visible when it changes the
+// all-active-pools-failed verdict: pair the enabled-but-empty following
+// pool with a FAILING (not succeeding) news pool. Correctly, exactly one
+// pool is ACTIVE (news) and it failed, so runRefresh must return an error.
+// Under the regression, following is wrongly counted into "attempted"
+// (PoolEnabled("following") is true) but refreshFollowing's internal guard
+// still keeps it out of "failed" — diluting attempted=2/failed=1 into a
+// false success (nil, exit 0) for a user whose only working pool just
+// broke.
+func TestRunRefresh_FollowingEnabledButEmptyDoesNotMaskNewsFailure(t *testing.T) {
+	isolateXDG(t)
+	swapHNSource(t, brokenAlgoliaStub(t).URL)
+	writeRefreshConfigExplicitPools(t,
+		[]string{"news", "following"},
+		nil, // following enabled, zero feeds: enabled but not active
+		[]string{"hackernews"},
+	)
+
+	if err := runRefresh(); err == nil {
+		t.Fatal("runRefresh() = nil with the only ACTIVE pool (news) failing, want an error: an enabled-but-empty following pool must not dilute the all-active-pools-failed verdict")
+	}
+
+	newsPath, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(newsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("feed.json exists after a failed news fetch (stat err = %v); a failed pool must not write", err)
+	}
+	if log := refreshLogOrEmpty(t); strings.Contains(log, "following") {
+		t.Errorf("refresh.log has a following-pool line for a pool with nothing configured (enabled != active):\n%s", log)
+	}
+}
+
+// TestRunDefault_SinglePoolRenderIsByteExact is the header-leak guard.
+// TestRunDefault_RendersFromFreshCache above asserts substrings only and
+// would pass happily with a "╭─ News ─╮" header printed over the box; the
+// single-pool experience must stay byte-identical to the pre-pool render,
+// which means a bare render.Boxed and nothing else.
+func TestRunDefault_SinglePoolRenderIsByteExact(t *testing.T) {
+	isolateXDG(t)
+	original := spawnRefresh
+	spawnRefresh = func() { t.Error("fresh cache must not spawn a refresh") }
+	t.Cleanup(func() { spawnRefresh = original })
+
+	now := time.Now().UTC()
+	story := fetch.Story{
+		ID:        "hn-1",
+		Title:     "A seeded story",
+		URL:       "https://example.com/x",
+		Source:    "hackernews",
+		Points:    100,
+		Author:    "alice",
+		CreatedAt: now.Add(-2 * time.Hour),
+		Tags:      []string{},
+	}
+	path, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("cache.PoolPath: %v", err)
+	}
+	if err := cache.Write(path, &cache.File{
+		Version:         cache.SchemaVersion,
+		CachedByVersion: defaults.Version,
+		FetchedAt:       now.Add(-5 * time.Minute),
+		Stories:         []fetch.Story{story},
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := runDefault(&buf, io.Discard, nil, rand.New(rand.NewSource(1))); err != nil {
+		t.Fatalf("runDefault: %v", err)
+	}
+	want := render.Boxed(story, now, defaults.TermWidth(defaults.BoxWidth))
+	if buf.String() != want {
+		t.Errorf("single-pool render is no longer byte-identical to Boxed\n got: %q\nwant: %q", buf.String(), want)
+	}
+}
+
+// TestRunDefault_TwoPoolsStackInPoolOrder is the end-to-end counterpart:
+// two seeded cache files, two labelled boxes, following first.
+func TestRunDefault_TwoPoolsStackInPoolOrder(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	original := spawnRefresh
+	spawnRefresh = func() {}
+	t.Cleanup(func() { spawnRefresh = original })
+
+	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	toml := `pools = ["news", "following"]
+pool_order = ["following", "news"]
+count = 1
+following_count = 1
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://a.example/feed.xml"
+`
+	if err := os.WriteFile(cfgPath, []byte(toml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	now := time.Now().UTC()
+	writePool := func(pool string, stories []fetch.Story) {
+		p, err := cache.PoolPath(pool)
+		if err != nil {
+			t.Fatalf("cache.PoolPath(%q): %v", pool, err)
+		}
+		if err := cache.Write(p, &cache.File{
+			Version:         cache.SchemaVersion,
+			CachedByVersion: defaults.Version,
+			FetchedAt:       now.Add(-time.Minute),
+			Stories:         stories,
+		}); err != nil {
+			t.Fatalf("seed %s cache: %v", pool, err)
+		}
+	}
+	writePool("news", []fetch.Story{{
+		ID: "hn-1", Title: "React 21 drops with native signals",
+		URL: "https://reactjs.org/", Source: "hackernews", Points: 400,
+		CreatedAt: now.Add(-2 * time.Hour), Tags: []string{},
+	}})
+	writePool("following", []fetch.Story{{
+		ID: "f-1", Title: "The case for slow blogging",
+		URL: "https://drewdevault.com/slow", Source: "following",
+		Feed:      "https://a.example/feed.xml",
+		CreatedAt: now.Add(-48 * time.Hour), Tags: []string{},
+	}})
+
+	var stdout, stderr bytes.Buffer
+	if err := runDefault(&stdout, &stderr, nil, rand.New(rand.NewSource(1))); err != nil {
+		t.Fatalf("runDefault: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	followingAt := strings.Index(out, "╭─ Following ─")
+	newsAt := strings.Index(out, "╭─ News ─")
+	if followingAt < 0 || newsAt < 0 {
+		t.Fatalf("expected both labelled box headers; got:\n%s", out)
+	}
+	if followingAt > newsAt {
+		t.Errorf("pools stacked out of pool_order; got:\n%s", out)
+	}
+	for _, want := range []string{"The case for slow blogging", "React 21 drops with native signals"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunDefault_StyleJSON_NothingToShowIsAnEmptyArray is the end-to-end
+// half of the same fix. The reachable configuration needs no network and
+// no failure: one enabled pool whose cache read cleanly and held zero
+// stories. Before the fix runDefault printed the offline sentence with no
+// style dispatch at all, so a --style=json consumer piping into jq broke
+// on a perfectly healthy install.
+func TestRunDefault_StyleJSON_NothingToShowIsAnEmptyArray(t *testing.T) {
+	_, configDir := isolateXDG(t)
+	original := spawnRefresh
+	spawnRefresh = func() {}
+	t.Cleanup(func() { spawnRefresh = original })
+
+	cfgPath := filepath.Join(configDir, "newsfetch", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	toml := "pools = [\"following\"]\n\n[[following.feeds]]\nurl = \"https://a.example/feed.xml\"\n"
+	if err := os.WriteFile(cfgPath, []byte(toml), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	now := time.Now().UTC()
+	path, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatalf("cache.PoolPath: %v", err)
+	}
+	if err := cache.Write(path, &cache.File{
+		Version:         cache.SchemaVersion,
+		CachedByVersion: defaults.Version,
+		FetchedAt:       now.Add(-time.Minute),
+		Stories:         []fetch.Story{},
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runDefault(&stdout, &stderr, []string{"--style=json"}, rand.New(rand.NewSource(1))); err != nil {
+		t.Fatalf("runDefault: %v\nstderr: %s", err, stderr.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("--style=json emitted non-JSON with nothing to show: %v\nstdout: %q", err, stdout.String())
+	}
+	if len(payload) != 0 {
+		t.Errorf("got %d elements, want 0: %s", len(payload), stdout.String())
+	}
+}
+
+// TestSettingsAnswers_PreservesUnsetFeedKnobs pins the read half of the
+// --settings round trip. config.FeedConfig uses a zero value to mean
+// "unset"; onboard.Feed uses a nil pointer. Mapping an unset knob to a
+// non-nil zero pointer would make the writer emit `max_items = 0` into the
+// user's file — a value they never chose and one the loader clamps.
+func TestSettingsAnswers_PreservesUnsetFeedKnobs(t *testing.T) {
+	cases := []struct {
+		name         string
+		in           config.FeedConfig
+		wantMaxItems *int
+		wantWeight   *float64
+	}{
+		{"both unset", config.FeedConfig{URL: "https://a.example/f"}, nil, nil},
+		{"max_items only", config.FeedConfig{URL: "https://a.example/f", MaxItems: 2}, intp(2), nil},
+		{"weight only", config.FeedConfig{URL: "https://a.example/f", Weight: 0.3}, nil, floatp(0.3)},
+		{"both set", config.FeedConfig{URL: "https://a.example/f", MaxItems: 10, Weight: 5}, intp(10), floatp(5)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Following.Feeds = []config.FeedConfig{tc.in}
+			got := settingsAnswers(cfg)
+			if len(got.Feeds) != 1 {
+				t.Fatalf("Feeds = %+v, want exactly one", got.Feeds)
+			}
+			if got.Feeds[0].URL != tc.in.URL {
+				t.Errorf("URL = %q, want %q", got.Feeds[0].URL, tc.in.URL)
+			}
+			if !reflect.DeepEqual(got.Feeds[0].MaxItems, tc.wantMaxItems) {
+				t.Errorf("MaxItems = %v, want %v", derefInt(got.Feeds[0].MaxItems), derefInt(tc.wantMaxItems))
+			}
+			if !reflect.DeepEqual(got.Feeds[0].Weight, tc.wantWeight) {
+				t.Errorf("Weight = %v, want %v", derefFloat(got.Feeds[0].Weight), derefFloat(tc.wantWeight))
+			}
+		})
+	}
+}
+
+func intp(n int) *int { return &n }
+
+func floatp(f float64) *float64 { return &f }
+
+func derefInt(p *int) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%d", *p)
+}
+
+func derefFloat(p *float64) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%v", *p)
+}
+
+// TestSettingsAnswers_ConfigRoundTripIsByteIdentical is the regression guard
+// for the whole task. A --settings run that changes nothing must rewrite the
+// user's file to exactly the bytes it started with; any advanced per-feed
+// knob dropped anywhere between config.Load and renderConfigTOML shows up
+// here as a diff. The fixture is written in renderConfigTOML's own output
+// format so the comparison is a genuine identity, not an approximation.
+func TestSettingsAnswers_ConfigRoundTripIsByteIdentical(t *testing.T) {
+	const fixture = `# newsfetch config. Edit freely; see spec.md for field meanings.
+
+topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+pool_order = ["following", "news"]
+count = 2
+following_count = 1
+ticker_marker = "dot"
+ticker_boxed = false
+cache_ttl_minutes = 45
+min_points = 10
+dedup_ttl_hours = 3
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://drewdevault.com/blog/index.xml"
+
+[[following.feeds]]
+url = "https://blog.cloudflare.com/rss/"
+max_items = 2
+weight = 0.3
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, settingsAnswers(cfg)); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if string(got) != fixture {
+		t.Errorf("round trip changed the config file\n--- got ---\n%s\n--- want ---\n%s", got, fixture)
+	}
+}
+
+// TestSettingsAnswers_NonFiniteWeightNeverReachesTheFile walks the one path
+// that skips every weight validator. --settings loads config.toml through
+// config.Load WITHOUT calling config.Validate, so a hand-written
+// `weight = nan` — which TOML accepts as a float literal — arrives in
+// settingsAnswers as a genuine NaN, becomes a non-nil *float64 (NaN != 0),
+// and lands in the writer. tomlFloat is the last guard, and this is the
+// only test that exercises it end to end: without it the rewritten file
+// would say `weight = NaN.0`, which is not valid TOML, and the user's next
+// terminal open would fail to load their config at all.
+func TestSettingsAnswers_NonFiniteWeightNeverReachesTheFile(t *testing.T) {
+	const fixture = `topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+count = 1
+following_count = 1
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://a.example/f"
+weight = nan
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	a := settingsAnswers(cfg)
+	// Guard the guard: if the projection ever starts dropping NaN, this
+	// test would pass for the wrong reason and stop covering tomlFloat.
+	if len(a.Feeds) != 1 || a.Feeds[0].Weight == nil || !math.IsNaN(*a.Feeds[0].Weight) {
+		t.Fatalf("fixture no longer carries a NaN weight into the writer: %+v", a.Feeds)
+	}
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, a); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if strings.Contains(string(data), "weight") {
+		t.Errorf("a non-finite weight was written back:\n%s", data)
+	}
+	// The real damage is unloadability, so assert that directly rather than
+	// trusting the substring check to have caught every bad spelling.
+	back, err := config.Load(out)
+	if err != nil {
+		t.Fatalf("rewritten config no longer loads: %v", err)
+	}
+	if len(back.Following.Feeds) != 1 {
+		t.Fatalf("Following.Feeds = %+v, want the feed preserved", back.Following.Feeds)
+	}
+	if back.Following.Feeds[0].Weight != 0 {
+		t.Errorf("Weight = %v, want 0 (omitted means no manual override)", back.Following.Feeds[0].Weight)
+	}
+}
+
+// TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk pins fix round
+// 3's correction: config.Load encodes a max_items/weight the user typed as
+// literal 0 as the internal -1 "explicit zero" sentinel (see
+// config.explicitZeroMarker) so config.Validate can tell that apart from an
+// absent key. Rounds 1 and 2 both had settingsAnswers drop that sentinel to
+// "unset" on projection — round 1 got there by validating first (reverted,
+// see TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated), round 2 by
+// treating any non-positive value as absent. Both silently moved the feed's
+// effective max_items cap from 1 (what config.Validate actually clamps an
+// explicit zero to, since defaults.MinFeedItems is 1) up to 3 (the
+// documented default for a genuinely absent key) the moment a user ran
+// --settings for anything unrelated, and the per-render out-of-range
+// warning stopped along with it.
+//
+// The corrected rule: preserve what the user wrote when it can be
+// represented, substitute only when it cannot. Zero cannot be represented
+// (FeedConfig reserves 0 for "absent"), so settingsAnswers now writes
+// defaults.MinFeedItems in its place — the value the program actually runs
+// with today — instead of omitting the key. An absent key stays absent. A
+// positive but out-of-range value (this fixture's fourth feed) CAN be
+// represented, so it round-trips unchanged and the user keeps seeing the
+// warning that tells them to fix it. Weight is untouched by any of this:
+// for weight, "unset" and what Validate clamps an explicit zero to are the
+// same value (0), so omission was always exact.
+//
+// Every existing "unset" case up to this point constructed
+// config.FeedConfig directly in Go, which produces a real zero and never
+// exercises the sentinel — this test instead seeds an actual config FILE and
+// decodes it through config.Load, the only place the sentinel is ever
+// produced.
+//
+// settingsAnswers is called directly on the UNVALIDATED config.Load output
+// because that is production's own sequence, not a shortcut taken by the
+// test: settingsCurrent deliberately skips config.Validate so a feed with an
+// unparseable URL is not deleted from the user's file, which
+// TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated pins. Nothing clamps
+// the sentinel before the projection sees it, so this guard is the only one
+// standing in the path config.Load -> settingsAnswers -> OverwriteConfig.
+func TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk(t *testing.T) {
+	const fixture = `topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+count = 1
+following_count = 1
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "https://a.example/explicit-zero"
+max_items = 0
+weight = 0
+
+[[following.feeds]]
+url = "https://a.example/absent"
+
+[[following.feeds]]
+url = "https://a.example/valid"
+max_items = 5
+weight = 2.5
+
+[[following.feeds]]
+url = "https://a.example/out-of-range"
+max_items = 99
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Guard the guard: if config.Load ever stops producing the sentinel for
+	// an explicit zero, this test would pass without exercising the bug.
+	if cfg.Following.Feeds[0].MaxItems != -1 || cfg.Following.Feeds[0].Weight != -1 {
+		t.Fatalf("fixture no longer decodes to the explicit-zero sentinel: %+v", cfg.Following.Feeds[0])
+	}
+	a := settingsAnswers(cfg)
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, a); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if strings.Contains(string(data), "max_items = -1") || strings.Contains(string(data), "weight = -1") {
+		t.Errorf("the explicit-zero sentinel escaped into the rewritten config:\n%s", data)
+	}
+	back, err := config.Load(out)
+	if err != nil {
+		t.Fatalf("rewritten config no longer loads: %v", err)
+	}
+	want := []config.FeedConfig{
+		{URL: "https://a.example/explicit-zero", MaxItems: 1},
+		{URL: "https://a.example/absent"},
+		{URL: "https://a.example/valid", MaxItems: 5, Weight: 2.5},
+		{URL: "https://a.example/out-of-range", MaxItems: 99},
+	}
+	if !reflect.DeepEqual(back.Following.Feeds, want) {
+		t.Errorf("Following.Feeds = %+v, want %+v", back.Following.Feeds, want)
+	}
+}
+
+// TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated pins fix round 2's
+// reversal of fix round 1: settingsCurrent (SettingsDeps.Current's
+// production implementation) must NOT run the loaded config through
+// config.Validate before projecting it into Answers.
+//
+// Fix round 1 added that Validate call to resolve config.Load's internal
+// "explicit zero" sentinel (see TestSettingsAnswers_ExplicitZeroSentinelNeverEscapesToDisk
+// above) into a real value. That traded a bounded numeric corruption for a
+// worse bug: config.Validate's splitFeeds drops any feed whose URL is
+// unparseable, relative, or missing a supported scheme (see
+// internal/config/validate.go's feedURLProblem) — meant to keep unusable
+// feeds off the render/fetch path. But OverwriteConfig regenerates the
+// ENTIRE config file from Answers, so validating in settingsCurrent would
+// make the very next `--settings` save silently DELETE that feed's line,
+// with no warning (the writer is discarded). A mistyped URL is the one
+// part of a feed entry a user cannot reconstruct from memory, unlike an
+// out-of-range max_items/weight, which is just a number Validate would
+// clamp back into range. A user who mistypes a URL today sees a per-render
+// warning and can go fix the character; they must not lose the line
+// entirely just because they ran --settings for something unrelated.
+//
+// This test calls settingsCurrent itself rather than re-implementing its
+// two steps (config.Load then settingsAnswers) inline. Fix round 2's first
+// version did the latter, with a comment claiming it matched Current
+// "exactly" — and it passed even after the coordinator re-applied the
+// mistake to the real closure, because a re-implementation cannot observe
+// a change to the thing it re-implements. Driving settingsCurrent directly
+// is what makes this test able to catch config.Validate being reintroduced
+// there.
+func TestSettingsAnswers_InvalidFeedURLSurvivesUnvalidated(t *testing.T) {
+	const fixture = `# newsfetch config. Edit freely; see spec.md for field meanings.
+
+topics = ["rust"]
+style = "boxed"
+pools = ["news", "following"]
+pool_order = ["following", "news"]
+count = 1
+following_count = 1
+ticker_marker = "dot"
+ticker_boxed = false
+cache_ttl_minutes = 30
+min_points = 50
+dedup_ttl_hours = 6
+
+[news]
+aggregators = ["hackernews"]
+
+[[following.feeds]]
+url = "example.com/feed.xml"
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	// Prove the premise: this URL is exactly the shape config.Validate
+	// drops. Without this, the test would not demonstrate why
+	// settingsCurrent must skip Validate, only that it happens to.
+	cfg, err := config.Load(src)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if len(cfg.Following.Feeds) != 1 || cfg.Following.Feeds[0].URL != "example.com/feed.xml" {
+		t.Fatalf("fixture did not decode the invalid-URL feed as loaded: %+v", cfg.Following.Feeds)
+	}
+	validated := config.Validate(cfg, config.FieldSources{}, io.Discard)
+	if len(validated.Following.Feeds) != 0 {
+		t.Fatalf("fixture URL no longer trips config.Validate's feed-drop rule, test no longer proves anything: %+v", validated.Following.Feeds)
+	}
+	// Drive the real production path — settingsCurrent itself, the exact
+	// function SettingsFlow calls as Current — not a reimplementation of it.
+	a, err := settingsCurrent(src)
+	if err != nil {
+		t.Fatalf("settingsCurrent: %v", err)
+	}
+	out := filepath.Join(dir, "rewritten.toml")
+	if err := onboard.OverwriteConfig(out, a); err != nil {
+		t.Fatalf("OverwriteConfig: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if string(got) != fixture {
+		t.Errorf("a --settings round trip must not delete a feed with an invalid URL\n--- got ---\n%s\n--- want (byte-identical) ---\n%s", got, fixture)
+	}
+}
+
+// TestRunUninstall_PipedKeepsState pins the locked non-TTY rule: a piped
+// --uninstall removes config and the caches, leaves every state file
+// alone, and says in one line where the state it kept still lives. The
+// protection is structural — runUninstall withholds the state group from
+// the roster when stdin is not a TTY — so the Confirm function is still
+// answering yes to everything it is asked.
+func TestRunUninstall_PipedKeepsState(t *testing.T) {
+	isolateXDG(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	cfgPath, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	newsCache, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(news): %v", err)
+	}
+	followingCache, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(following): %v", err)
+	}
+	cacheDir, err := cache.Dir()
+	if err != nil {
+		t.Fatalf("cache.Dir: %v", err)
+	}
+	logPath, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	seenPath, err := history.Path()
+	if err != nil {
+		t.Fatalf("history.Path: %v", err)
+	}
+	sessionsPath, err := session.Path()
+	if err != nil {
+		t.Fatalf("session.Path: %v", err)
+	}
+	feedsPath, err := feedstate.Path()
+	if err != nil {
+		t.Fatalf("feedstate.Path: %v", err)
+	}
+	stateDir := filepath.Dir(seenPath)
+
+	removed := []string{
+		cfgPath,
+		newsCache,
+		followingCache,
+		logPath,
+	}
+	// refresh.lock sits with the caches but is not one: it is the whole
+	// mutual exclusion for the detached background refresh, so it is kept
+	// for the same reason the state sidecars are.
+	locks := []string{
+		filepath.Join(cacheDir, "refresh.lock"),
+		filepath.Join(stateDir, "seen.lock"),
+		filepath.Join(stateDir, "sessions.lock"),
+		filepath.Join(stateDir, "feeds.lock"),
+	}
+	kept := append([]string{seenPath, sessionsPath, feedsPath}, locks...)
+	for _, p := range append(append([]string{}, removed...), kept...) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A pipe read end is a real *os.File that is definitively not a TTY.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close(); w.Close() })
+
+	out := &bytes.Buffer{}
+	if err := runUninstall(out, r); err != nil {
+		t.Fatalf("runUninstall: %v", err)
+	}
+
+	for _, p := range removed {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("piped uninstall should have removed %s", p)
+		}
+	}
+	for _, p := range kept {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("piped uninstall must not touch %s: %v", p, err)
+		}
+	}
+	got := out.String()
+	for _, p := range locks {
+		if !strings.Contains(got, p) {
+			t.Errorf("kept-locks notice should name %s so the user knows what is left behind and why:\n%s", p, got)
+		}
+	}
+	if !strings.Contains(got, stateDir) {
+		t.Errorf("kept-state notice should name the state directory %s:\n%s", stateDir, got)
+	}
+	for _, name := range []string{"seen.json", "sessions.json", "feeds.json"} {
+		if !strings.Contains(got, name) {
+			t.Errorf("kept-state notice should name %s:\n%s", name, got)
+		}
+	}
+	// The notice names the directory; it must never hand the user a
+	// pasteable rm -rf, because the interpolated path is unquoted and a
+	// space or a shell metacharacter in it makes the command mean
+	// something else entirely.
+	if strings.Contains(got, "rm -rf") {
+		t.Errorf("kept-state notice must not print an rm -rf command:\n%s", got)
+	}
+	if strings.Contains(got, "[y/N]") {
+		t.Errorf("piped uninstall must not print a prompt:\n%s", got)
+	}
+}
+
+// TestRunUninstall_RerunAsksNothingAboutSurvivingLocks pins the situation a
+// user actually meets, not a synthetic stand-in for it: run --uninstall to
+// completion, then run it again. A confirmed run empties the state group's
+// data files but never unlinks a lock sidecar (that is the whole point of
+// the previous fix round — see stateRemovables and removeEntry) so the
+// second run starts with three lock files on disk and nothing else. It
+// must not prompt about state again — the presence check that landed with
+// that fix counts a data file, not its sidecar, so a lone lock is not
+// present — and it must not describe those surviving locks as something
+// removable: printKeptLocks' "kept" framing has to be the only thing said
+// about them, never maybeRemoveGroup's "left in place (rm to remove)",
+// which is what a present-but-declined entry gets.
+//
+// TestUninstallFlow_OrphanedLockIsNotPresent already pins the presence
+// check in isolation, by planting one orphaned lock by hand. This test is
+// not a duplicate of it: it reaches the same state through two real
+// UninstallFlow calls against one on-disk tree, so it also exercises
+// whatever the first run's confirmed removal actually leaves behind — all
+// three state locks, not one placed directly — and it pins the second
+// run's OUTPUT (the printKeptLocks wording), which the flow-level test
+// cannot reach because printKeptLocks lives in this package, not onboard.
+//
+// runUninstall's own TTY branch cannot be driven from a test — term.IsTerminal
+// needs a real terminal, and neither a pipe nor a redirected file is one —
+// so this calls the same two functions runUninstall calls on the
+// interactive path (onboard.UninstallFlow with the State group populated,
+// then printKeptLocks) directly, against paths built from the production
+// roster functions, rather than going through runUninstall itself.
+func TestRunUninstall_RerunAsksNothingAboutSurvivingLocks(t *testing.T) {
+	isolateXDG(t)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	cfgPath, err := config.Path()
+	if err != nil {
+		t.Fatalf("config.Path: %v", err)
+	}
+	newsCache, err := cache.PoolPath("news")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(news): %v", err)
+	}
+	followingCache, err := cache.PoolPath("following")
+	if err != nil {
+		t.Fatalf("cache.PoolPath(following): %v", err)
+	}
+	cacheDir, err := cache.Dir()
+	if err != nil {
+		t.Fatalf("cache.Dir: %v", err)
+	}
+	logPath, err := refreshlog.Path()
+	if err != nil {
+		t.Fatalf("refreshlog.Path: %v", err)
+	}
+	seenPath, err := history.Path()
+	if err != nil {
+		t.Fatalf("history.Path: %v", err)
+	}
+	sessionsPath, err := session.Path()
+	if err != nil {
+		t.Fatalf("session.Path: %v", err)
+	}
+	feedsPath, err := feedstate.Path()
+	if err != nil {
+		t.Fatalf("feedstate.Path: %v", err)
+	}
+	stateDir := filepath.Dir(seenPath)
+
+	dataFiles := []string{cfgPath, newsCache, followingCache, logPath, seenPath, sessionsPath, feedsPath}
+	locks := []string{
+		filepath.Join(cacheDir, "refresh.lock"),
+		filepath.Join(stateDir, "seen.lock"),
+		filepath.Join(stateDir, "sessions.lock"),
+		filepath.Join(stateDir, "feeds.lock"),
+	}
+	for _, p := range append(append([]string{}, dataFiles...), locks...) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newDeps := func(out io.Writer, confirm func(string) bool) onboard.UninstallDeps {
+		return onboard.UninstallDeps{
+			Shell:   onboard.Detect,
+			Out:     out,
+			Confirm: confirm,
+			Config:  onboard.Removable{Label: "config.toml", Path: config.Path},
+			Caches:  cacheRemovables(),
+			State:   stateRemovables(),
+		}
+	}
+
+	// First run: the interactive shape, confirmed yes to every group.
+	firstOut := &bytes.Buffer{}
+	if err := onboard.UninstallFlow(newDeps(firstOut, func(string) bool { return true })); err != nil {
+		t.Fatalf("first UninstallFlow: %v", err)
+	}
+	printKeptLocks(firstOut)
+
+	// Guard the guard: the second run's "nothing to ask" only means
+	// something if the first run actually did what the rest of this suite
+	// already pins — data gone, locks surviving — rather than the fixture
+	// starting that way by accident.
+	for _, p := range dataFiles {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("fixture problem: %s should have been removed by the first run", p)
+		}
+	}
+	for _, p := range locks {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("fixture problem: lock %s should survive the first run: %v", p, err)
+		}
+	}
+
+	// Second run: nothing but the four lock files remains on disk.
+	prompts := 0
+	var prompted []string
+	secondOut := &bytes.Buffer{}
+	if err := onboard.UninstallFlow(newDeps(secondOut, func(prompt string) bool {
+		prompts++
+		prompted = append(prompted, prompt)
+		return true
+	})); err != nil {
+		t.Fatalf("second UninstallFlow: %v", err)
+	}
+	printKeptLocks(secondOut)
+
+	if prompts != 0 {
+		t.Errorf("second run asked %d prompt(s) %v, want 0: every group's data files are already gone, and a surviving lock must not count as something present to ask about", prompts, prompted)
+	}
+	got := secondOut.String()
+	if strings.Contains(got, "left in place") {
+		t.Errorf("second run's output reads as if something were present and declined, but nothing was even asked about:\n%s", got)
+	}
+	for _, p := range locks {
+		if !strings.Contains(got, p) {
+			t.Errorf("second run should still name surviving lock %s in the kept-locks notice:\n%s", p, got)
+		}
+	}
+	if !strings.Contains(got, "lock files kept") {
+		t.Errorf("second run's output should carry the kept-locks notice, not describe the locks as removable:\n%s", got)
+	}
+	for _, p := range locks {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("lock %s must still survive after the second run: %v", p, err)
+		}
+	}
+}
+
+// TestCacheRemovables_ExcludesLockFiles pins refresh.lock's removal from
+// the cache roster. It was listed there because a bare lock file left
+// behind in an otherwise empty directory reads as litter — but it is the
+// sole mutual exclusion for the detached background refresh, which
+// acquires it with a zero timeout and exits quietly when it is already
+// held. Unlink it mid-flight and the next refresh creates a fresh inode at
+// the same name, acquires that, and runs alongside the refresh already
+// running, each believing it is the only one. No cache entry may resolve
+// to a .lock path.
+//
+// The roster is checked for its data files too: an entry list that had
+// simply gone empty would satisfy the .lock rule while quietly leaving
+// every cache file on disk forever.
+func TestCacheRemovables_ExcludesLockFiles(t *testing.T) {
+	isolateXDG(t)
+
+	want := map[string]bool{"feed.json": true, "following.json": true, "refresh.log": true}
+	got := cacheRemovables()
+	seen := map[string]bool{}
+	for _, r := range got {
+		if r.Path == nil {
+			t.Errorf("cache roster entry %q has a nil Path", r.Label)
+			continue
+		}
+		path, err := r.Path()
+		if err != nil {
+			t.Fatalf("%s: Path(): %v", r.Label, err)
+		}
+		if filepath.Ext(path) == ".lock" || filepath.Ext(r.Label) == ".lock" {
+			t.Errorf("cache roster entry %q resolves to %s: unlinking a lock path lets a second process create and lock a fresh file at that name, and for refresh.lock that means two background refreshes running at once", r.Label, path)
+		}
+		seen[r.Label] = true
+	}
+	for label := range want {
+		if !seen[label] {
+			t.Errorf("cache roster is missing %q", label)
+		}
+	}
+}
+
+// TestStateRemovables_NamesEveryStateFileAndItsLockSidecar pins the
+// contents of stateRemovables, the roster runUninstall hands to
+// UninstallFlow's State group ONLY when stdin is a TTY (runUninstall). No
+// existing test calls stateRemovables directly: TestRunUninstall_PipedKeepsState
+// exercises the piped path, which withholds the State group entirely and so
+// never reaches this function at all. That leaves the roster itself — the
+// list a confirmed interactive uninstall actually deletes — referenced by
+// nothing: it could return an empty slice, drop an entry, or forget an
+// entry's Lock sidecar (leaving an orphaned .lock file behind, or leaving
+// UninstallFlow unable to hold the sidecar across the unlink) and the suite
+// would stay green.
+func TestStateRemovables_NamesEveryStateFileAndItsLockSidecar(t *testing.T) {
+	isolateXDG(t)
+
+	// label -> expected lock sidecar basename, per stateRemovables' doc
+	// comment: seen.json/seen.lock, sessions.json/sessions.lock,
+	// feeds.json/feeds.lock.
+	want := map[string]string{
+		"seen.json":     "seen.lock",
+		"sessions.json": "sessions.lock",
+		"feeds.json":    "feeds.lock",
+	}
+
+	got := stateRemovables()
+	if len(got) != len(want) {
+		t.Fatalf("stateRemovables() returned %d entries, want %d: %+v", len(got), len(want), got)
+	}
+
+	seenLabels := map[string]bool{}
+	for _, r := range got {
+		wantLock, ok := want[r.Label]
+		if !ok {
+			t.Errorf("unexpected entry %q in the uninstall roster", r.Label)
+			continue
+		}
+		if seenLabels[r.Label] {
+			t.Errorf("entry %q appears more than once in the uninstall roster", r.Label)
+		}
+		seenLabels[r.Label] = true
+
+		if r.Path == nil {
+			t.Errorf("%s: Path is nil, so this entry could never be resolved or removed", r.Label)
+			continue
+		}
+		path, err := r.Path()
+		if err != nil {
+			t.Fatalf("%s: Path(): %v", r.Label, err)
+		}
+		if filepath.Base(path) != r.Label {
+			t.Errorf("%s: Path() = %q, want a path ending in %q", r.Label, path, r.Label)
+		}
+
+		if r.Lock == nil {
+			t.Fatalf("%s: Lock is nil — its .lock sidecar would survive an uninstall as an orphan, "+
+				"or UninstallFlow could not hold it across the unlink", r.Label)
+		}
+		lockPath, err := r.Lock()
+		if err != nil {
+			t.Fatalf("%s: Lock(): %v", r.Label, err)
+		}
+		if filepath.Base(lockPath) != wantLock {
+			t.Errorf("%s: Lock() = %q, want a path ending in %q", r.Label, lockPath, wantLock)
+		}
+		if filepath.Dir(lockPath) != filepath.Dir(path) {
+			t.Errorf("%s: lock sidecar %q is not beside the state file %q", r.Label, lockPath, path)
+		}
+	}
+	for label := range want {
+		if !seenLabels[label] {
+			t.Errorf("uninstall roster is missing %q", label)
+		}
 	}
 }

@@ -1,7 +1,6 @@
 package render
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -43,6 +42,11 @@ func KnownTickerMarkers() []TickerMarker {
 type MultiOptions struct {
 	Marker TickerMarker
 	Boxed  bool
+	// Header labels the render's top border with the pool it belongs to.
+	// Empty means no label, which is the byte-identical single-pool shape:
+	// a user with one pool must see exactly the render they saw before
+	// pools existed, so the label is opt-in rather than defaulted.
+	Header string
 }
 
 // Multi renders a hero+ticker layout: the first story as a [Boxed] panel,
@@ -74,21 +78,23 @@ func Multi(stories []fetch.Story, now time.Time, width int, opts MultiOptions) (
 		width = minWidth
 	}
 	if len(stories) == 1 {
-		return Boxed(stories[0], now, width), nil
+		// boxedLabelled with an empty Header is Boxed, so the single-story
+		// delegation is unchanged for every caller that sets no header.
+		return boxedLabelled(stories[0], now, width, opts.Header), nil
 	}
 	if opts.Boxed {
-		return renderMultiBoxed(stories, now, width, opts.Marker), nil
+		return renderMultiBoxed(stories, now, width, opts.Marker, opts.Header), nil
 	}
-	return renderMultiPlain(stories, now, width, opts.Marker), nil
+	return renderMultiPlain(stories, now, width, opts.Marker, opts.Header), nil
 }
 
 // renderMultiPlain renders the hero in its own box with ticker lines below.
 // Tickers are indented two columns so their content sits where the hero's
 // content sits (one box-edge column plus one pad column). Branch markers
 // add a ┬ on the hero's bottom edge so the spine reads as continuous.
-func renderMultiPlain(stories []fetch.Story, now time.Time, width int, marker TickerMarker) string {
+func renderMultiPlain(stories []fetch.Story, now time.Time, width int, marker TickerMarker, header string) string {
 	var b strings.Builder
-	b.WriteString(heroBox(stories[0], now, width, marker == TickerBranch))
+	b.WriteString(heroBox(stories[0], now, width, marker == TickerBranch, header))
 	tickers := stories[1:]
 	for i, s := range tickers {
 		mk := markerSymbol(marker, i, len(tickers))
@@ -108,7 +114,7 @@ func renderMultiPlain(stories []fetch.Story, now time.Time, width int, marker Ti
 // renderMultiBoxed renders one outer box: hero on top, a horizontal
 // divider, then ticker rows inside the same box. Branch markers add a ┬
 // on the divider above the spine column.
-func renderMultiBoxed(stories []fetch.Story, now time.Time, width int, marker TickerMarker) string {
+func renderMultiBoxed(stories []fetch.Story, now time.Time, width int, marker TickerMarker, header string) string {
 	contentW := width - 4
 	if contentW < 1 {
 		contentW = 1
@@ -121,7 +127,7 @@ func renderMultiBoxed(stories []fetch.Story, now time.Time, width int, marker Ti
 		divider = boxLeftTee + boxHoriz + boxDownTee + strings.Repeat(boxHoriz, width-4) + boxRightTee
 	}
 	var b strings.Builder
-	b.WriteString(boxTopLeft + horiz + boxTopRight + "\n")
+	b.WriteString(topBorder(width, header) + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(stories[0].Title, contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(metaLine(stories[0], now), contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(divider + "\n")
@@ -138,18 +144,17 @@ func renderMultiBoxed(stories []fetch.Story, now time.Time, width int, marker Ti
 
 // heroBox renders the standard [Boxed] hero, optionally swapping its
 // bottom-left corner for a ╰─┬ when a branch spine continues below.
-func heroBox(s fetch.Story, now time.Time, width int, withSpine bool) string {
+func heroBox(s fetch.Story, now time.Time, width int, withSpine bool, header string) string {
 	if !withSpine {
-		return Boxed(s, now, width)
+		return boxedLabelled(s, now, width, header)
 	}
 	contentW := width - 4
 	if contentW < 1 {
 		contentW = 1
 	}
-	horiz := strings.Repeat(boxHoriz, width-2)
 	bottom := boxBotLeft + boxHoriz + boxDownTee + strings.Repeat(boxHoriz, width-4) + boxBotRight
 	var b strings.Builder
-	b.WriteString(boxTopLeft + horiz + boxTopRight + "\n")
+	b.WriteString(topBorder(width, header) + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(s.Title, contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(boxVert + " " + padRight(truncate(metaLine(s, now), contentW), contentW) + " " + boxVert + "\n")
 	b.WriteString(bottom + "\n")
@@ -181,37 +186,4 @@ func tickerBody(s fetch.Story, now time.Time, budget int) string {
 		return truncate(s.Title+suffix, budget)
 	}
 	return truncate(s.Title, budget-suffixCols) + suffix
-}
-
-// JSONMulti renders stories as a JSON array, one object per story, matching
-// the [JSON] single-story shape per element. The trailing newline matches
-// JSON's pipeline-friendly convention.
-func JSONMulti(stories []fetch.Story, now time.Time) string {
-	type payload struct {
-		Title      string   `json:"title"`
-		URL        string   `json:"url"`
-		Source     string   `json:"source"`
-		AgeSeconds int64    `json:"age_seconds"`
-		Tags       []string `json:"tags"`
-	}
-	out := make([]payload, len(stories))
-	for i, s := range stories {
-		tags := s.Tags
-		if tags == nil {
-			tags = []string{}
-		}
-		ageSeconds := int64(now.Sub(s.CreatedAt).Seconds())
-		if ageSeconds < 0 {
-			ageSeconds = 0
-		}
-		out[i] = payload{
-			Title:      s.Title,
-			URL:        s.URL,
-			Source:     s.Source,
-			AgeSeconds: ageSeconds,
-			Tags:       tags,
-		}
-	}
-	b, _ := json.Marshal(out)
-	return string(b) + "\n"
 }

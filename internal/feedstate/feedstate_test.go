@@ -568,6 +568,186 @@ func TestWeights_NotModifiedRetainsDocumentShape(t *testing.T) {
 	}
 }
 
+// datesExpired returns n pubDates five weeks before refNow(): dated items
+// that have rolled out of the 4-week rate window. A feed holding only
+// these has a rate of 0 and is dormant — the state whose boost coverage
+// scaling has to discount when the document dated only part of itself.
+func datesExpired(n int) []time.Time {
+	out := make([]time.Time, n)
+	for i := range out {
+		out[i] = refNow().Add(-5 * week).Add(-time.Duration(i) * time.Hour)
+	}
+	return out
+}
+
+// TestWeights_CoverageScalesTheCadenceWeight pins the repair of the
+// mixed-document gap: the capped cadence weight is multiplied by the last
+// full document's date coverage, LastDocDated/LastDocItems.
+//
+// Left unscaled, a document with one dated item in fifty (that date out of
+// window) satisfies the dormant-eligibility rule on the strength of its
+// single date and takes the full cap — while its forty-nine undated items
+// each take fetch time as their timestamp, i.e. maximum recency. Max boost
+// times max recency, on every render, from one badly dated feed.
+//
+// Every case pairs the probe with an anchor publishing 4 in-window items
+// (rate 1.0/wk), so the corpus median is a known number, and gives both
+// feeds 8 weeks of history so confidence is 1 and the cold-start blend is
+// a no-op. wantAnchor is asserted too: a probe with no cadence signal
+// drops out of the median and moves the anchor's own weight, and that is
+// behaviour a coverage change must not quietly alter.
+func TestWeights_CoverageScalesTheCadenceWeight(t *testing.T) {
+	now := refNow()
+	old := now.Add(-8 * week)
+
+	cases := []struct {
+		name       string
+		dates      []time.Time
+		items      int
+		dated      int
+		wantProbe  float64
+		wantAnchor float64
+	}{
+		// rates {probe 0, anchor 1.0} -> median (0+1.0)/2 = 0.5.
+		// probe: rate 0 -> computed 5.0; coverage 50/50 = 1.0 -> 5.0.
+		// anchor: computed 0.5/1.0 = 0.5; coverage 4/4 = 1.0 -> 0.5.
+		{
+			name:       "every item dated keeps the whole dormant boost",
+			dates:      datesExpired(50),
+			items:      50,
+			dated:      50,
+			wantProbe:  5.0,
+			wantAnchor: 0.5,
+		},
+		// rates {0, 1.0} -> median 0.5. probe: 5.0 * (25/50 = 0.5) = 2.5.
+		// anchor: 0.5/1.0 = 0.5 * 1.0 = 0.5.
+		{
+			name:       "half the document dated halves the boost",
+			dates:      datesExpired(25),
+			items:      50,
+			dated:      25,
+			wantProbe:  2.5,
+			wantAnchor: 0.5,
+		},
+		// rates {0, 1.0} -> median 0.5. probe: 5.0 * (1/50 = 0.02) = 0.1,
+		// i.e. effectively out of the running rather than at the cap.
+		// anchor: 0.5/1.0 = 0.5 * 1.0 = 0.5.
+		{
+			name:       "one dated item in fifty is effectively neutralised",
+			dates:      datesExpired(1),
+			items:      50,
+			dated:      1,
+			wantProbe:  0.1,
+			wantAnchor: 0.5,
+		},
+		// dated 0 with items present is not dormant-eligible at all, so the
+		// probe is neutral 1.0 and contributes no rate to the corpus:
+		// rates {1.0} -> median 1.0 -> anchor 1.0/1.0 = 1.0. Coverage never
+		// gets a say here; the eligibility rule already handled it.
+		{
+			name:       "no dated items at all stays neutral, not scaled",
+			dates:      nil,
+			items:      50,
+			dated:      0,
+			wantProbe:  1.0,
+			wantAnchor: 1.0,
+		},
+		// The zero-items guard: an empty document is a quiet feed, not a
+		// badly dated one, so coverage is 1.0 rather than a division by
+		// zero. rates {0, 1.0} -> median 0.5; probe 5.0 * 1.0 = 5.0;
+		// anchor 0.5/1.0 = 0.5.
+		{
+			name:       "an empty document keeps the full boost",
+			dates:      nil,
+			items:      0,
+			dated:      0,
+			wantProbe:  5.0,
+			wantAnchor: 0.5,
+		},
+		// Coverage scales a non-dormant weight too, not just the cap.
+		// probe rate = 1 in-window date / 4 = 0.25/wk; rates {0.25, 1.0} ->
+		// median (0.25+1.0)/2 = 0.625. probe computed = 0.625/0.25 = 2.5;
+		// coverage 2/4 = 0.5 -> 1.25. anchor = 0.625/1.0 = 0.625 * 1.0.
+		{
+			name:       "coverage scales a computed weight, not only the cap",
+			dates:      datesWithin(1),
+			items:      4,
+			dated:      2,
+			wantProbe:  1.25,
+			wantAnchor: 0.625,
+		},
+		// Defensive clamp: a stored pair that disagrees with itself (more
+		// dated than items — unreachable from the fetcher, which counts
+		// both over the same slice) must not multiply the weight ABOVE the
+		// cap. 5/2 = 2.5 clamps to 1.0, so probe 5.0 * 1.0 = 5.0;
+		// rates {0, 1.0} -> median 0.5 -> anchor 0.5.
+		{
+			name:       "a dated count above the item count clamps to full coverage",
+			dates:      datesExpired(2),
+			items:      2,
+			dated:      5,
+			wantProbe:  5.0,
+			wantAnchor: 0.5,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
+				{
+					URL:          "probe",
+					FirstSeen:    old,
+					ObservedAt:   now,
+					PubDates:     tc.dates,
+					EverDated:    true,
+					LastDocItems: tc.items,
+					LastDocDated: tc.dated,
+				},
+				datedFeed("anchor", old, datesWithin(4)), // 4 in-window dates -> 1.0/wk
+			}}
+			w := f.Weights([]string{"probe", "anchor"}, now)
+			if got := w["probe"]; math.Abs(got-tc.wantProbe) > 1e-9 {
+				t.Errorf("probe = %v, want %v", got, tc.wantProbe)
+			}
+			if got := w["anchor"]; math.Abs(got-tc.wantAnchor) > 1e-9 {
+				t.Errorf("anchor = %v, want %v", got, tc.wantAnchor)
+			}
+		})
+	}
+}
+
+// TestWeights_CoverageAppliesBeforeTheColdStartBlend pins the ORDER of the
+// two adjustments, which the table above cannot see (it runs every case at
+// full confidence, where the blend is the identity). Coverage discounts
+// the evidence the computed weight is built from, so it belongs to the
+// computed weight; the blend then walks that number toward neutral as a
+// young feed earns trust. Scaling after the blend would instead discount
+// the neutral 1.0 a brand-new feed is entitled to, pushing an unproven
+// feed BELOW neutral on nothing but its document's shape.
+func TestWeights_CoverageAppliesBeforeTheColdStartBlend(t *testing.T) {
+	now := refNow()
+	f := &feedstate.File{Version: feedstate.SchemaVersion, Feeds: []feedstate.Feed{
+		{
+			URL:          "half-covered",
+			FirstSeen:    now.Add(-2 * week), // confidence 2wk/4wk = 0.5
+			ObservedAt:   now,
+			PubDates:     datesExpired(5),
+			EverDated:    true,
+			LastDocItems: 10,
+			LastDocDated: 5,
+		},
+		datedFeed("anchor", now.Add(-8*week), datesWithin(4)), // 1.0/wk
+	}}
+	w := f.Weights([]string{"half-covered", "anchor"}, now)
+	// rates {0, 1.0} -> median 0.5. Rate 0 -> computed 5.0; coverage
+	// 5/10 = 0.5 scales the COMPUTED weight to 2.5; then the blend:
+	// 0.5*2.5 + 0.5*1.0 = 1.75. Scaling after the blend instead would
+	// give (0.5*5.0 + 0.5*1.0) * 0.5 = 1.5.
+	if got := w["half-covered"]; math.Abs(got-1.75) > 1e-9 {
+		t.Errorf("half-covered = %v, want 1.75 (coverage scales the computed weight, before the cold-start blend)", got)
+	}
+}
+
 func TestRead_CorruptErrors(t *testing.T) {
 	path := tmp(t)
 	if err := os.WriteFile(path, []byte("{nope"), 0o644); err != nil {

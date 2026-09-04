@@ -20,3 +20,6 @@ coverage.html
 
 # Local logs
 *.log
+
+# Subagent-driven-development workspace (ledger, briefs, review packages)
+.superpowers/

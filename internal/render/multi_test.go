@@ -173,24 +173,6 @@ func TestMulti_ErrorsOnEmpty(t *testing.T) {
 	}
 }
 
-func TestJSONMulti_EmitsArray(t *testing.T) {
-	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
-	stories := fixtureStories(now)
-	got := render.JSONMulti(stories, now)
-	if !strings.HasPrefix(got, "[") {
-		t.Errorf("JSONMulti must emit an array; got: %s", got)
-	}
-	if !strings.HasSuffix(strings.TrimRight(got, "\n"), "]") {
-		t.Errorf("JSONMulti must emit a closed array; got: %s", got)
-	}
-	if !strings.Contains(got, `"title":"Hero story title"`) {
-		t.Errorf("JSONMulti missing first story; got: %s", got)
-	}
-	if !strings.Contains(got, `"title":"Third story"`) {
-		t.Errorf("JSONMulti missing last story; got: %s", got)
-	}
-}
-
 // TestKnownTickerMarkers_ReturnsCopy pins the registry's immutability: a
 // caller mutating the returned slice must not affect what later callers
 // see (the validator and the wizards all consume this list).
@@ -199,5 +181,130 @@ func TestKnownTickerMarkers_ReturnsCopy(t *testing.T) {
 	a[0] = "mutated"
 	if b := render.KnownTickerMarkers(); b[0] == "mutated" {
 		t.Error("KnownTickerMarkers shares its backing array; want a fresh copy per call")
+	}
+}
+
+// TestMulti_ZeroOptionsIsTodaysRender is the no-movement guard for the
+// header work: nothing sets MultiOptions.Header yet, so a zero-valued
+// MultiOptions must still produce exactly the bytes v0.6.0 produced. The
+// goldens are inline so a regression shows as a diff, not as a recomputed
+// expectation.
+func TestMulti_ZeroOptionsIsTodaysRender(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	stories := fixtureStories(now)
+	cases := []struct {
+		name string
+		n    int
+		want string
+	}{
+		{
+			name: "single story",
+			n:    1,
+			want: "" +
+				"╭────────────────────────────────────────────────╮\n" +
+				"│ Hero story title                               │\n" +
+				"│ example.com · 2h ago · by alice                │\n" +
+				"╰────────────────────────────────────────────────╯\n",
+		},
+		{
+			name: "hero plus tickers",
+			n:    3,
+			want: "" +
+				"╭────────────────────────────────────────────────╮\n" +
+				"│ Hero story title                               │\n" +
+				"│ example.com · 2h ago · by alice                │\n" +
+				"╰────────────────────────────────────────────────╯\n" +
+				"  · Second story — blog.rust-lang.org (5h ago)\n" +
+				"  · Third story — example.org (30m ago)\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mustMulti(t, stories[:tc.n], now, 50, render.MultiOptions{})
+			if got != tc.want {
+				t.Errorf("Multi mismatch\n--- got ---\n%s--- want ---\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMulti_HeaderGolden pins the labelled shape at the everyday width, for
+// both the single-story box and the boxed hero+ticker unit.
+func TestMulti_HeaderGolden(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	stories := fixtureStories(now)
+	cases := []struct {
+		name string
+		n    int
+		opts render.MultiOptions
+		want string
+	}{
+		{
+			name: "single story labelled box",
+			n:    1,
+			opts: render.MultiOptions{Marker: render.TickerDot, Header: "Following"},
+			want: "" +
+				"╭─ Following ────────────────────────────────────╮\n" +
+				"│ Hero story title                               │\n" +
+				"│ example.com · 2h ago · by alice                │\n" +
+				"╰────────────────────────────────────────────────╯\n",
+		},
+		{
+			name: "boxed hero and tickers labelled",
+			n:    3,
+			opts: render.MultiOptions{Marker: render.TickerDot, Boxed: true, Header: "Following"},
+			want: "" +
+				"╭─ Following ────────────────────────────────────╮\n" +
+				"│ Hero story title                               │\n" +
+				"│ example.com · 2h ago · by alice                │\n" +
+				"├────────────────────────────────────────────────┤\n" +
+				"│ · Second story — blog.rust-lang.org (5h ago)   │\n" +
+				"│ · Third story — example.org (30m ago)          │\n" +
+				"╰────────────────────────────────────────────────╯\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mustMulti(t, stories[:tc.n], now, 50, tc.opts)
+			if got != tc.want {
+				t.Errorf("Multi mismatch\n--- got ---\n%s--- want ---\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMulti_HeaderNarrowWidthDoesNotPanic mirrors
+// TestMulti_NarrowWidthDoesNotPanic with a header set. "Following" needs 14
+// columns to render whole, so at the clamped floor of 10 ruling R-19's
+// truncate-then-drop path is the only thing standing between this and a box
+// wider than the ticker rows hanging off it.
+func TestMulti_HeaderNarrowWidthDoesNotPanic(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	stories := fixtureStories(now)
+	for _, width := range []int{0, 1, 3, 9, 10, 14} {
+		for _, boxed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("width=%d/boxed=%t", width, boxed), func(t *testing.T) {
+				got, err := render.Multi(stories, now, width, render.MultiOptions{
+					Marker: render.TickerBranch, Boxed: boxed, Header: "Following",
+				})
+				if err != nil {
+					t.Fatalf("Multi(width=%d, boxed=%t) error: %v", width, boxed, err)
+				}
+				if got == "" {
+					t.Errorf("Multi(width=%d, boxed=%t) = empty, want a render", width, boxed)
+				}
+				ceiling := width
+				if ceiling < clampedWidth {
+					ceiling = clampedWidth
+				}
+				// Box-drawing and marker glyphs are single-column and the
+				// fixtures are ASCII, so a rune count is a column count.
+				for i, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+					if n := utf8.RuneCountInString(line); n > ceiling {
+						t.Errorf("line %d is %d columns, want <= %d: %q", i, n, ceiling, line)
+					}
+				}
+			})
+		}
 	}
 }

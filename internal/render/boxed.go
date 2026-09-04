@@ -31,6 +31,14 @@ const (
 // argument is the reference point for the "X ago" relative timestamp so that
 // output is deterministic for tests.
 func Boxed(s fetch.Story, now time.Time, width int) string {
+	return boxedLabelled(s, now, width, "")
+}
+
+// boxedLabelled is [Boxed] with an optional pool label written into the top
+// border. It exists so the multi-pool stacker can label a box without
+// keeping a second copy of the panel body; [Boxed] is the empty-label case
+// and stays byte-for-byte what it always was.
+func boxedLabelled(s fetch.Story, now time.Time, width int, label string) string {
 	if width < minWidth {
 		width = minWidth
 	}
@@ -45,11 +53,47 @@ func Boxed(s fetch.Story, now time.Time, width int) string {
 	horiz := strings.Repeat(boxHoriz, width-2)
 
 	var b strings.Builder
-	b.WriteString(boxTopLeft + horiz + boxTopRight + "\n")
+	b.WriteString(topBorder(width, label) + "\n")
 	b.WriteString(boxVert + " " + padRight(title, contentWidth) + " " + boxVert + "\n")
 	b.WriteString(boxVert + " " + padRight(meta, contentWidth) + " " + boxVert + "\n")
 	b.WriteString(boxBotLeft + horiz + boxBotRight + "\n")
 	return b.String()
+}
+
+// topBorder builds a box's top edge, width columns wide, with no trailing
+// newline. It is the single home for that edge so every box in the package
+// keeps the same shape.
+//
+// A non-empty label is written into the border as "╭─ Label ───". The label
+// never widens the box: stacked pool boxes must align, so a label that will
+// not fit is truncated, and one that cannot be truncated to at least one
+// rune is dropped in favour of the plain border. That is also what keeps
+// strings.Repeat off a negative count at pathological widths.
+func topBorder(width int, label string) string {
+	const (
+		// corners, the one leading dash, and the two spaces around the label
+		labelChrome = 5
+		// corners only
+		plainChrome = 2
+	)
+	if label != "" {
+		fill := width - labelChrome - utf8.RuneCountInString(label)
+		if fill < 1 {
+			// Leave room for exactly one trailing dash, then re-measure:
+			// truncate can only shrink the label, so fill lands at >= 1
+			// unless the width cannot hold a label at all.
+			label = truncate(label, width-labelChrome-1)
+			fill = width - labelChrome - utf8.RuneCountInString(label)
+		}
+		if fill >= 1 {
+			return boxTopLeft + boxHoriz + " " + label + " " + strings.Repeat(boxHoriz, fill) + boxTopRight
+		}
+	}
+	n := width - plainChrome
+	if n < 0 {
+		n = 0
+	}
+	return boxTopLeft + strings.Repeat(boxHoriz, n) + boxTopRight
 }
 
 // Fallback renders the neutral "no fresh news" message the caller passes in.
