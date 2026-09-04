@@ -36,7 +36,16 @@ jobs:
       - name: GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          # The GoReleaser CLI version (the action itself is pinned at v6
+          # above). 'latest' was the previous value; the v0.7.0 release run
+          # warned "You are using 'latest' as default version. Will lock to
+          # '~> v2'" and did exactly that, so the effective version was
+          # already the v2 line — this just states it instead of leaving it
+          # to the action's default. The max-satisfying-semver form keeps
+          # picking up v2 patch and minor releases; a GoReleaser v3, which
+          # would drop the deprecated brews: block among other things, no
+          # longer arrives unannounced mid-release.
+          version: '~> v2'
           args: release --clean
         env:
           # GITHUB_TOKEN: creates the Release on this repo, uploads
