@@ -147,6 +147,10 @@ release:
   # noise without context. Future tags can add their own header block
   # here or fall through to plain auto-changelog. Remove this clause
   # whenever it stops being useful.
+  #
+  # v0.7.0 gets a header for the opposite reason: its branch was squash-
+  # merged, so the auto-changelog between v0.6.0 and v0.7.0 is two lines
+  # and says nothing about the breaking --style=json shape change.
   header: |
     {{- if eq .Tag "v0.4.6" }}
     **v0.4.6 — first stable binary release.**
@@ -158,6 +162,28 @@ release:
     Install via the [README's options](https://github.com/PietroCoppola/newsfetch#install) — `curl | sh`, Homebrew, or `go install`. Run `newsfetch --init` after installing to set up topics and patch your shell.
 
     The auto-changelog below lists the full project history; that's a one-time artifact of this being the first stable tag.
+    {{- end }}
+    {{- if eq .Tag "v0.7.0" }}
+    **v0.7.0 — M5: your own RSS feeds.**
+
+    newsfetch gains a second *pool*. A pool is an independent fetch → rank → render pipeline; enabled pools stack vertically and never rank against each other. `news` (Hacker News, Lobste.rs) is now joined by `following` — RSS/Atom feeds you subscribe to, ranked on recency × publishing cadence × topic instead of points.
+
+    Add feeds with `newsfetch --settings`, or by hand:
+
+    ```toml
+    pools = ["following", "news"]
+
+    [[following.feeds]]
+    url = "https://drewdevault.com/blog/index.xml"
+    ```
+
+    With one pool enabled the render is byte-identical to v0.6.0 — if you add no feeds, nothing changes.
+
+    **Breaking: `--style=json` is now always an array.** Earlier versions emitted a bare object when exactly one story rendered. The shape is uniform now — one array, always, with a `pool` field on every object. Scripts that indexed the bare object need `[0]`.
+
+    **Deprecated: the top-level `sources` key.** Still read, and aliased to `pools` plus `[news] aggregators`, so existing configs keep working untouched. Running `newsfetch --settings` rewrites the file in the new spelling.
+
+    Full config reference in the [README](https://github.com/PietroCoppola/newsfetch#config-reference).
     {{- end }}
   footer: |
     ## Verifying
